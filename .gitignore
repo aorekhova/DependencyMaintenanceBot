@@ -1,0 +1,10 @@
+mend-vulnerabilities.json
+mend-success-*.json
+mend-report-*.json
+reports/
+.env
+.env.*
+target/
+.idea/
+.vscode/
+*.iml
