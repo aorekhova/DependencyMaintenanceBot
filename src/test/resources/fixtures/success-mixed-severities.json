@@ -1,0 +1,10 @@
+{
+  "vulnerabilities": [
+    { "name": "FAKE-CVE-0000-0001", "severity": "critical" },
+    { "name": "FAKE-CVE-0000-0002", "severity": "high" },
+    { "name": "FAKE-CVE-0000-0003", "severity": "High" },
+    { "name": "FAKE-CVE-0000-0004", "severity": "MEDIUM" },
+    { "name": "FAKE-CVE-0000-0005", "severity": "low" },
+    { "name": "FAKE-CVE-0000-0006", "severity": "informational" }
+  ]
+}

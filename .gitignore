@@ -1,10 +1,23 @@
-mend-vulnerabilities.json
-mend-success-*.json
-mend-report-*.json
-reports/
+# Real Mend data must never be committed.
+# Anchored to the repository root so these patterns cannot swallow test fixtures
+# living under src/test/resources/ (git patterns without a leading slash match at
+# every directory depth).
+/mend-vulnerabilities.json
+/mend-success-*.json
+/mend-report-*.json
+/reports/
+
+# Local secrets
 .env
 .env.*
+
+# Build output
 target/
+
+# IDE
 .idea/
 .vscode/
 *.iml
+
+# Synthetic test fixtures are always tracked, whatever the rules above say.
+!/src/test/resources/**

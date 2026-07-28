@@ -1,0 +1,61 @@
+{
+  "requestToken": "fake-request-token-0000",
+  "vulnerabilities": [
+    {
+      "name": "FAKE-CVE-0000-0011",
+      "severity": "high",
+      "score": 8.1,
+      "cvss3Severity": "high",
+      "cvss3Score": 8.1,
+      "publishDate": "2020-01-01",
+      "lastUpdatedDate": "2020-02-02",
+      "scoreMetadataVector": "FAKE/AV:N/AC:L",
+      "description": "Synthetic finding used only for tests. Not a real vulnerability.",
+      "library": {
+        "keyUuid": "00000000-0000-0000-0000-000000000001",
+        "name": "example-fake-lib-core-1.0.0.jar",
+        "filename": "example-fake-lib-core-1.0.0.jar",
+        "groupId": "com.example.fake",
+        "artifactId": "example-fake-lib-core",
+        "version": "1.0.0",
+        "architecture": "",
+        "languageVersion": ""
+      },
+      "topFix": {
+        "vulnerability": "FAKE-CVE-0000-0011",
+        "type": "UPGRADE_VERSION",
+        "origin": "EXAMPLE_FAKE",
+        "url": "https://example.invalid/fake-advisory/0011",
+        "fixResolution": "com.example.fake:example-fake-lib-core:1.0.1",
+        "date": "2020-03-03",
+        "message": "Upgrade to a fixed version."
+      },
+      "allFixes": [
+        {
+          "vulnerability": "FAKE-CVE-0000-0011",
+          "type": "UPGRADE_VERSION",
+          "fixResolution": "com.example.fake:example-fake-lib-core:1.0.1"
+        }
+      ],
+      "locations": [
+        { "path": "/synthetic/path/example-fake-lib-core-1.0.0.jar", "dependencyType": "MAVEN" }
+      ],
+      "project": "synthetic-test-project",
+      "projectId": 111111,
+      "product": "synthetic-test-product",
+      "productId": 222222
+    },
+    {
+      "name": "FAKE-CVE-0000-0012",
+      "severity": "low",
+      "score": 2.2,
+      "library": {
+        "name": "example-fake-utils-2.0.0.jar",
+        "groupId": "com.example.fake",
+        "artifactId": "example-fake-utils",
+        "version": "2.0.0"
+      },
+      "project": "synthetic-test-project"
+    }
+  ]
+}
