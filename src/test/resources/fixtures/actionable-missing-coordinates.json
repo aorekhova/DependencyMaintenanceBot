@@ -1,0 +1,51 @@
+{
+  "vulnerabilities": [
+    {
+      "name": "FAKE-CVE-0000-0501",
+      "severity": "high",
+      "library": {
+        "name": "example-fake-nogroup-1.0.0.jar",
+        "artifactId": "example-fake-nogroup",
+        "version": "1.0.0"
+      }
+    },
+    {
+      "name": "FAKE-CVE-0000-0502",
+      "severity": "high",
+      "library": {
+        "name": "example-fake-noartifact-2.0.0.jar",
+        "groupId": "com.example.fake",
+        "version": "2.0.0"
+      }
+    },
+    {
+      "name": "FAKE-CVE-0000-0503",
+      "severity": "high",
+      "library": {
+        "name": "example-fake-noversion.jar",
+        "groupId": "com.example.fake",
+        "artifactId": "example-fake-noversion"
+      }
+    },
+    {
+      "name": "FAKE-CVE-0000-0504",
+      "severity": "high",
+      "library": {
+        "name": "example-fake-blankgroup-3.0.0.jar",
+        "groupId": "   ",
+        "artifactId": "example-fake-blankgroup",
+        "version": "3.0.0"
+      }
+    },
+    {
+      "name": "FAKE-CVE-0000-0505",
+      "severity": "critical",
+      "library": {
+        "name": "example-fake-complete-4.0.0.jar",
+        "groupId": "com.example.fake",
+        "artifactId": "example-fake-complete",
+        "version": "4.0.0"
+      }
+    }
+  ]
+}

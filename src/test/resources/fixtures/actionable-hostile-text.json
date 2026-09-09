@@ -1,0 +1,39 @@
+{
+  "vulnerabilities": [
+    {
+      "name": "FAKE-CVE-0000-1101",
+      "type": "SECURITY_VULNERABILITY",
+      "severity": "critical",
+      "cvss3_severity": "critical",
+      "cvss3_score": 9.9,
+      "url": "https://example.invalid/fake-advisory/1101?a=1&b=2",
+      "description": "Pipe | inside a value. Quote \" inside. Backslash \\ inside.\nSecond line of the description.\nEmbedded synthetic token TOKEN-DO-NOT-LEAK-7b1c must never survive redaction.",
+      "project": "synthetic | project",
+      "product": "synthetic\nproduct",
+      "library": {
+        "groupId": "com.example.fake",
+        "artifactId": "example-fake-hostile",
+        "version": "1.0.0",
+        "name": "example-fake-hostile-1.0.0.jar | odd",
+        "filename": "example-fake-hostile-1.0.0.jar",
+        "sha1": "0000000000000000000000000000000000001101",
+        "description": "Library note with a pipe | and a token USERKEY-DO-NOT-LEAK-9f3a inside."
+      },
+      "topFix": {
+        "type": "UPGRADE_VERSION",
+        "fixResolution": "com.example.fake:example-fake-hostile:1.0.1",
+        "message": "Upgrade.\nNote the pipe | and quote \" here, plus TOKEN-DO-NOT-LEAK-7b1c."
+      },
+      "allFixes": [
+        {
+          "type": "UPGRADE_VERSION",
+          "fixResolution": "com.example.fake:example-fake-hostile:1.0.1",
+          "message": "Multi\nline | message with USERKEY-DO-NOT-LEAK-9f3a."
+        }
+      ],
+      "locations": [
+        { "matchType": "EXACT_MATCH", "path": "/synthetic/path with | pipe/example-fake-hostile-1.0.0.jar" }
+      ]
+    }
+  ]
+}

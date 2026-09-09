@@ -1,0 +1,28 @@
+{
+  "vulnerabilities": [
+    {
+      "name": "FAKE-CVE-0000-0901",
+      "severity": "critical",
+      "topFix": null,
+      "allFixes": [
+        null,
+        {
+          "type": "UPGRADE_VERSION",
+          "fixResolution": "com.example.fake:example-fake-nulls:1.0.1"
+        },
+        null,
+        {
+          "type": "CHANGE_FILES",
+          "fixResolution": "Apply the second synthetic patch."
+        },
+        null
+      ],
+      "locations": [
+        null,
+        { "matchType": "EXACT_MATCH", "path": "/synthetic/first.jar" },
+        null,
+        { "matchType": "FILENAME_MATCH", "path": "/synthetic/second.jar" }
+      ]
+    }
+  ]
+}

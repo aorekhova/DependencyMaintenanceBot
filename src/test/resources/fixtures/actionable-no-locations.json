@@ -1,0 +1,20 @@
+{
+  "vulnerabilities": [
+    {
+      "name": "FAKE-CVE-0000-0701",
+      "severity": "high",
+      "description": "Synthetic finding with no locations key at all.",
+      "library": {
+        "groupId": "com.example.fake",
+        "artifactId": "example-fake-nolocations",
+        "version": "1.2.3"
+      }
+    },
+    {
+      "name": "FAKE-CVE-0000-0702",
+      "severity": "high",
+      "description": "Synthetic finding whose locations array is empty.",
+      "locations": []
+    }
+  ]
+}

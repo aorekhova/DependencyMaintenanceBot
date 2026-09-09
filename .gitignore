@@ -21,3 +21,27 @@ target/
 
 # Synthetic test fixtures are always tracked, whatever the rules above say.
 !/src/test/resources/**
+
+# Build output
+target/
+
+# Runtime/report artifacts
+reports/runs/
+*.zip
+report-review-*/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Local secrets/config
+.env
+.env.*
+*.log
+
+# Claude temporary worktrees
+.claude/worktrees/
+
+# All generated runtime reports
+reports/

@@ -33,6 +33,16 @@ class NoRealMendEndpointTest {
     private static final String FORBIDDEN_VENDOR_HOST = "whitesourcesoftware" + ".com";
     private static final String FORBIDDEN_ENV_CALL = "fromEnvironment" + "()";
 
+    /**
+     * A method reference to the same no-argument overload. It reads the real environment just as surely,
+     * only later -- and it does not contain {@link #FORBIDDEN_ENV_CALL}, so the call-shaped check alone
+     * misses it. A real violation slipped through this way once.
+     */
+    private static final String FORBIDDEN_ENV_METHOD_REFERENCE = "::" + "fromEnvironment";
+
+    /** Writing here would put real report files in the developer's working tree. */
+    private static final String FORBIDDEN_DESTINATION_CALL = "defaultDestination" + "()";
+
     private static final List<Path> TEST_ROOTS = List.of(
             Paths.get("src", "test", "java"),
             Paths.get("src", "test", "resources"));
@@ -111,14 +121,44 @@ class NoRealMendEndpointTest {
             if (file.getFileName().toString().equals("NoRealMendEndpointTest.java")) {
                 continue;
             }
-            if (withoutBlockComments(read(file)).contains(FORBIDDEN_ENV_CALL)) {
+            // JenkinsRealPilotTool is the sole intentional exception: a main()-only manual pilot
+            // tool (no @Test method, never run by Surefire, never shipped in the production jar)
+            // that by its very purpose must read the developer's real Jenkins/WEBAPP_REPO_PATH
+            // environment to drive a real Jenkins job. See its own class javadoc.
+            if (file.getFileName().toString().equals("JenkinsRealPilotTool.java")) {
+                continue;
+            }
+            String source = withoutBlockComments(read(file));
+            if (source.contains(FORBIDDEN_ENV_CALL)
+                    || source.contains(FORBIDDEN_ENV_METHOD_REFERENCE)) {
                 offenders.add(file.toString());
             }
         }
 
         if (!offenders.isEmpty()) {
             fail("Tests must inject a configuration map instead of reading the real "
-                    + "environment. The no-argument call appears in: " + offenders);
+                    + "environment. The no-argument call, or a method reference to it, appears in: "
+                    + offenders);
+        }
+    }
+
+    @Test
+    @DisplayName("no test writes reports into the real reports directory")
+    void noTestWritesToTheRealReportDirectory() {
+        List<String> offenders = new ArrayList<>();
+
+        for (Path file : testFiles()) {
+            if (file.getFileName().toString().equals("NoRealMendEndpointTest.java")) {
+                continue;
+            }
+            if (withoutBlockComments(read(file)).contains(FORBIDDEN_DESTINATION_CALL)) {
+                offenders.add(file.toString());
+            }
+        }
+
+        if (!offenders.isEmpty()) {
+            fail("Tests must write reports into a @TempDir, never the real reports directory. "
+                    + "The default destination is used in: " + offenders);
         }
     }
 

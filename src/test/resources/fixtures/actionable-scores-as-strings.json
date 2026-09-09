@@ -1,0 +1,18 @@
+{
+  "vulnerabilities": [
+    {
+      "name": "FAKE-CVE-0000-0401",
+      "severity": "critical",
+      "score": "9.8",
+      "cvss3_severity": "critical",
+      "cvss3_score": "9.8"
+    },
+    {
+      "name": "FAKE-CVE-0000-0402",
+      "severity": "high",
+      "score": 7.5,
+      "cvss3_severity": "high",
+      "cvss3_score": 7.5
+    }
+  ]
+}

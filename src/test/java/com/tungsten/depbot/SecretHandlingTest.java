@@ -9,9 +9,16 @@ import com.tungsten.depbot.mend.MendGateway;
 import com.tungsten.depbot.mend.MendHttpException;
 import com.tungsten.depbot.mend.model.VulnerabilityRecord;
 import com.tungsten.depbot.mend.model.VulnerabilityReport;
+import com.tungsten.depbot.report.actionable.ActionableReportService;
+import com.tungsten.depbot.report.actionable.ReportDestination;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -43,9 +50,19 @@ class SecretHandlingTest {
         assertFalse(output.contains("null"), "a null message reached the console: " + output);
     }
 
-    private static CapturedConsole runScan(Supplier<EnvConfig> configSource, MendGateway gateway) {
+    /** Reports are written into a temporary directory, never the real one. */
+    @TempDir
+    Path reportDir;
+
+    private ActionableReportService reportService() {
+        return new ActionableReportService(
+                Clock.fixed(Instant.parse("2026-01-02T03:04:05Z"), ZoneOffset.UTC),
+                ReportDestination.into(reportDir));
+    }
+
+    private CapturedConsole runScan(Supplier<EnvConfig> configSource, MendGateway gateway) {
         CapturedConsole console = new CapturedConsole();
-        Main.run(new String[]{"scan"}, configSource, gateway, console.reporter());
+        Main.run(new String[]{"scan"}, configSource, gateway, console.reporter(), reportService());
         return console;
     }
 
@@ -114,7 +131,7 @@ class SecretHandlingTest {
         CapturedConsole console = new CapturedConsole();
         ExitCode code = Main.run(new String[]{"scan"}, GOOD_CONFIG, config -> {
             throw new RuntimeException("boom " + USER_KEY + " " + TOKEN);
-        }, console.reporter());
+        }, console.reporter(), reportService());
 
         assertEquals(ExitCode.UNEXPECTED_ERROR, code);
         assertNothingLeaked(console);
@@ -125,7 +142,7 @@ class SecretHandlingTest {
     void usagePath() {
         CapturedConsole console = new CapturedConsole();
         Main.run(new String[]{}, GOOD_CONFIG,
-                config -> new VulnerabilityReport(List.of()), console.reporter());
+                config -> new VulnerabilityReport(List.of()), console.reporter(), reportService());
         assertNothingLeaked(console);
     }
 

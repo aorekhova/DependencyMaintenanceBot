@@ -48,10 +48,13 @@ public final class MendClient implements MendGateway {
     }
 
     /**
-     * Test constructor. Package-private so tests can aim at a local mock server and shorten the
-     * request timeout; a fixed 30-second constant would make the timeout test take 30 seconds.
+     * Test constructor, letting a test aim at a local mock server and shorten the request timeout;
+     * a fixed 30-second constant would make the timeout test take 30 seconds.
+     *
+     * <p>Public so scan-level tests outside this package can drive a whole run over a real socket.
+     * Production code uses {@link #MendClient(HttpClient)}.
      */
-    MendClient(HttpClient httpClient, String endpoint, Duration requestTimeout) {
+    public MendClient(HttpClient httpClient, String endpoint, Duration requestTimeout) {
         this.httpClient = httpClient;
         this.endpoint = URI.create(endpoint);
         this.requestTimeout = requestTimeout;

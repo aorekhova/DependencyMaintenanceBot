@@ -1,0 +1,8 @@
+{
+  "vulnerabilities": [
+    {
+      "name": "FAKE-CVE-0000-0201",
+      "severity": "critical"
+    }
+  ]
+}

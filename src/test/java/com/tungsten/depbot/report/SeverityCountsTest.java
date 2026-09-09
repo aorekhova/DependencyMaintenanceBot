@@ -3,6 +3,8 @@ package com.tungsten.depbot.report;
 import com.tungsten.depbot.mend.model.VulnerabilityRecord;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -103,15 +105,18 @@ class SeverityCountsTest {
     }
 
     @Test
-    @DisplayName("a null element does not throw and counts as other")
+    @DisplayName("a null element does not throw and is ignored entirely, not counted as other")
     void nullElementIsSafe() {
+        // A null list element is not a vulnerability at all -- Mend's array containing a JSON
+        // null -- so it must not inflate total or otherCount. This differs from a real record
+        // whose severity happens to be null, which is still counted (see nullSeverityCountsAsOther).
         List<VulnerabilityRecord> list = new ArrayList<>(Arrays.asList(
                 new VulnerabilityRecord("high"), null));
 
         SeverityCounts counts = assertDoesNotThrow(() -> SeverityCounts.from(list));
-        assertEquals(2, counts.total());
+        assertEquals(1, counts.total());
         assertEquals(1, counts.highCount());
-        assertEquals(1, counts.otherCount());
+        assertEquals(0, counts.otherCount());
     }
 
     @Test
@@ -131,6 +136,7 @@ class SeverityCountsTest {
 
     @Test
     @DisplayName("counting is unaffected by a Turkish default locale")
+    @ResourceLock(Resources.LOCALE)
     void turkishLocaleRegression() {
         Locale original = Locale.getDefault();
         try {

@@ -1,0 +1,55 @@
+{
+  "vulnerabilities": [
+    {
+      "name": "FAKE-CVE-0000-0801",
+      "severity": "critical",
+      "cvss3_score": 9.6,
+      "topFix": {
+        "vulnerability": "FAKE-CVE-0000-0801",
+        "type": "UPGRADE_VERSION",
+        "origin": "EXAMPLE_FAKE_ADVISORY",
+        "url": "https://example.invalid/fake-fix/0801-top",
+        "fixResolution": "com.example.fake:example-fake-multi:2.0.0",
+        "date": "2021-03-04",
+        "message": "Preferred synthetic remediation."
+      },
+      "allFixes": [
+        {
+          "vulnerability": "FAKE-CVE-0000-0801",
+          "type": "UPGRADE_VERSION",
+          "origin": "EXAMPLE_FAKE_ADVISORY",
+          "url": "https://example.invalid/fake-fix/0801-top",
+          "fixResolution": "com.example.fake:example-fake-multi:2.0.0",
+          "date": "2021-03-04",
+          "message": "Preferred synthetic remediation."
+        },
+        {
+          "vulnerability": "FAKE-CVE-0000-0801",
+          "type": "CHANGE_FILES",
+          "origin": "EXAMPLE_FAKE_ADVISORY",
+          "url": "https://example.invalid/fake-fix/0801-alt",
+          "fixResolution": "Apply the synthetic patch bundle.",
+          "date": "2021-03-05",
+          "message": "Alternative synthetic remediation."
+        },
+        {
+          "type": "WORKAROUND"
+        }
+      ]
+    },
+    {
+      "name": "FAKE-CVE-0000-0802",
+      "severity": "high",
+      "allFixes": [
+        {
+          "type": "UPGRADE_VERSION",
+          "fixResolution": "com.example.fake:example-fake-notop:1.0.1"
+        }
+      ]
+    },
+    {
+      "name": "FAKE-CVE-0000-0803",
+      "severity": "high"
+    }
+  ]
+}

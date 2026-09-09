@@ -1,0 +1,75 @@
+{
+  "vulnerabilities": [
+    {
+      "name": "FAKE-CVE-0000-0101",
+      "type": "SECURITY_VULNERABILITY",
+      "severity": "high",
+      "score": 8.1,
+      "cvss3_severity": "high",
+      "cvss3_score": 8.1,
+      "publishDate": "2020-01-15",
+      "lastUpdatedDate": "2020-06-30",
+      "scoreMetadataVector": "FAKE/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "url": "https://example.invalid/fake-advisory/0101",
+      "description": "Synthetic finding used only for automated tests. Not a real vulnerability.",
+      "project": "synthetic-test-project",
+      "product": "synthetic-test-product",
+      "cvss3Attributes": {
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW"
+      },
+      "library": {
+        "keyUuid": "00000000-0000-0000-0000-000000000101",
+        "filename": "example-fake-lib-core-1.0.0.jar",
+        "type": "JAVA_ARCHIVE",
+        "description": "Synthetic library entry.",
+        "sha1": "0000000000000000000000000000000000000101",
+        "name": "example-fake-lib-core-1.0.0.jar",
+        "artifactId": "example-fake-lib-core",
+        "version": "1.0.0",
+        "groupId": "com.example.fake",
+        "architecture": "",
+        "languageVersion": ""
+      },
+      "topFix": {
+        "vulnerability": "FAKE-CVE-0000-0101",
+        "type": "UPGRADE_VERSION",
+        "origin": "EXAMPLE_FAKE_ADVISORY",
+        "url": "https://example.invalid/fake-fix/0101",
+        "fixResolution": "com.example.fake:example-fake-lib-core:1.0.1",
+        "date": "2020-07-01",
+        "message": "Upgrade to a fixed version."
+      },
+      "allFixes": [
+        {
+          "vulnerability": "FAKE-CVE-0000-0101",
+          "type": "UPGRADE_VERSION",
+          "origin": "EXAMPLE_FAKE_ADVISORY",
+          "url": "https://example.invalid/fake-fix/0101",
+          "fixResolution": "com.example.fake:example-fake-lib-core:1.0.1",
+          "date": "2020-07-01",
+          "message": "Upgrade to a fixed version."
+        },
+        {
+          "vulnerability": "FAKE-CVE-0000-0101",
+          "type": "CHANGE_FILES",
+          "origin": "EXAMPLE_FAKE_ADVISORY",
+          "url": "https://example.invalid/fake-fix/0101-alt",
+          "fixResolution": "Apply the synthetic patch file.",
+          "date": "2020-07-02",
+          "message": "Alternative synthetic remediation."
+        }
+      ],
+      "locations": [
+        {
+          "matchType": "EXACT_MATCH",
+          "path": "/synthetic/build/libs/example-fake-lib-core-1.0.0.jar"
+        },
+        {
+          "matchType": "FILENAME_MATCH",
+          "path": "/synthetic/cache/example-fake-lib-core-1.0.0.jar"
+        }
+      ]
+    }
+  ]
+}

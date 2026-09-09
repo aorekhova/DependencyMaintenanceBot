@@ -1,0 +1,23 @@
+{
+  "vulnerabilities": [
+    {
+      "name": "FAKE-CVE-0000-0301",
+      "type": null,
+      "severity": "high",
+      "score": null,
+      "cvss3_severity": null,
+      "cvss3_score": null,
+      "publishDate": null,
+      "lastUpdatedDate": null,
+      "scoreMetadataVector": null,
+      "url": null,
+      "description": null,
+      "project": null,
+      "product": null,
+      "library": null,
+      "topFix": null,
+      "allFixes": null,
+      "locations": null
+    }
+  ]
+}

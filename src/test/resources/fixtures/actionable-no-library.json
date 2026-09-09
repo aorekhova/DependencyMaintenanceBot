@@ -1,0 +1,16 @@
+{
+  "vulnerabilities": [
+    {
+      "name": "FAKE-CVE-0000-0601",
+      "type": "SECURITY_VULNERABILITY",
+      "severity": "critical",
+      "cvss3_severity": "critical",
+      "cvss3_score": 9.4,
+      "url": "https://example.invalid/fake-advisory/0601",
+      "description": "Synthetic finding with no library object at all.",
+      "locations": [
+        { "matchType": "EXACT_MATCH", "path": "/synthetic/lib/unknown-origin.jar" }
+      ]
+    }
+  ]
+}

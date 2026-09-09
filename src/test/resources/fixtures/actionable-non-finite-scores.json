@@ -1,0 +1,34 @@
+{
+  "vulnerabilities": [
+    {
+      "name": "FAKE-CVE-0000-1001",
+      "severity": "high",
+      "cvss3_score": "NaN"
+    },
+    {
+      "name": "FAKE-CVE-0000-1002",
+      "severity": "high",
+      "cvss3_score": "Infinity"
+    },
+    {
+      "name": "FAKE-CVE-0000-1003",
+      "severity": "high",
+      "cvss3_score": "-Infinity"
+    },
+    {
+      "name": "FAKE-CVE-0000-1004",
+      "severity": "high",
+      "cvss3_score": "N/A"
+    },
+    {
+      "name": "FAKE-CVE-0000-1005",
+      "severity": "high",
+      "cvss3_score": "   "
+    },
+    {
+      "name": "FAKE-CVE-0000-1006",
+      "severity": "high",
+      "cvss3_score": "7.4"
+    }
+  ]
+}

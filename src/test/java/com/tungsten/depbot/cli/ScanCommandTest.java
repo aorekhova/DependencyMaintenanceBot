@@ -9,9 +9,16 @@ import com.tungsten.depbot.mend.MendGateway;
 import com.tungsten.depbot.mend.MendHttpException;
 import com.tungsten.depbot.mend.model.VulnerabilityRecord;
 import com.tungsten.depbot.mend.model.VulnerabilityReport;
+import com.tungsten.depbot.report.actionable.ActionableReportService;
+import com.tungsten.depbot.report.actionable.ReportDestination;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -32,10 +39,18 @@ class ScanCommandTest {
     private static final EnvConfig CONFIG = new EnvConfig(USER_KEY, TOKEN);
     private static final Supplier<EnvConfig> GOOD_CONFIG = () -> CONFIG;
 
-    private static ExitCode run(CapturedConsole console,
-                                Supplier<EnvConfig> configSource,
-                                MendGateway gateway) {
-        return new ScanCommand(configSource, gateway, console.reporter()).run();
+    /** Reports are written into a temporary directory, never the real one. */
+    @TempDir
+    Path reportDir;
+
+    private ExitCode run(CapturedConsole console,
+                         Supplier<EnvConfig> configSource,
+                         MendGateway gateway) {
+        ActionableReportService reportService = new ActionableReportService(
+                Clock.fixed(Instant.parse("2026-01-02T03:04:05Z"), ZoneOffset.UTC),
+                ReportDestination.into(reportDir));
+
+        return new ScanCommand(configSource, gateway, console.reporter(), reportService).run();
     }
 
     @Test
