@@ -91,6 +91,26 @@ public final class RemediationBranchName {
     }
 
     /**
+     * {@code remediation/<runId>/<refSlug>-<shaPrefix>-publish/<groupId>}, a freshly (re)computed,
+     * disposable local branch {@code GitLabPublicationService} builds only for a non-first commit of a
+     * multi-commit cohort -- one remediation group's own isolated tree, standalone-re-validated before
+     * publication, distinct from both {@link #forRun}'s shared cohort branch (which may combine several
+     * groups) and {@link #forGroupCandidate}'s throwaway remediation-time candidate. Never trusted as
+     * persistent state across a retry -- recomputed (deleted and recreated) every time it is needed.
+     */
+    public static String forPublicationIsolation(
+            String runId, String verifiedSourceRef, String verifiedSourceSha, String groupId) {
+        Objects.requireNonNull(runId, "runId");
+        Objects.requireNonNull(verifiedSourceRef, "verifiedSourceRef");
+        Objects.requireNonNull(verifiedSourceSha, "verifiedSourceSha");
+        Objects.requireNonNull(groupId, "groupId");
+
+        String shaPrefix = verifiedSourceSha.length() > 12 ? verifiedSourceSha.substring(0, 12) : verifiedSourceSha;
+        return PREFIX + "/" + sanitize(runId) + "/" + sanitize(verifiedSourceRef) + "-" + sanitize(shaPrefix)
+                + "-publish/" + sanitize(groupId);
+    }
+
+    /**
      * {@code remediation/<runId>/<severity>/<groupId>__<artifactId>}
      *
      * @deprecated superseded by {@link #forRun}: every automatic remediation group in a run now lands on

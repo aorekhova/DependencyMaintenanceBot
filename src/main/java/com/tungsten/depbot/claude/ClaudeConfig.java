@@ -48,7 +48,8 @@ public record ClaudeConfig(
         int humanReviewFinalizationMaxTurns,
         Duration timeout, Duration analysisTimeout, Duration implementationTimeout,
         Duration humanReviewTimeout,
-        int analysisSecondAttemptMaxTurns, Duration analysisSecondAttemptTimeout) {
+        int analysisSecondAttemptMaxTurns, Duration analysisSecondAttemptTimeout,
+        int implementationExtendedMaxTurns, Duration implementationExtendedTimeout) {
 
     public static final String CLAUDE_EXECUTABLE = "CLAUDE_EXECUTABLE";
     public static final String CLAUDE_MODEL = "CLAUDE_MODEL";
@@ -71,6 +72,10 @@ public record ClaudeConfig(
             "CLAUDE_ANALYSIS_SECOND_ATTEMPT_MAX_TURNS";
     public static final String CLAUDE_ANALYSIS_SECOND_ATTEMPT_TIMEOUT_SECONDS =
             "CLAUDE_ANALYSIS_SECOND_ATTEMPT_TIMEOUT_SECONDS";
+    public static final String CLAUDE_IMPLEMENTATION_EXTENDED_MAX_TURNS =
+            "CLAUDE_IMPLEMENTATION_EXTENDED_MAX_TURNS";
+    public static final String CLAUDE_IMPLEMENTATION_EXTENDED_TIMEOUT_SECONDS =
+            "CLAUDE_IMPLEMENTATION_EXTENDED_TIMEOUT_SECONDS";
 
     public static final String DEFAULT_EXECUTABLE = "claude";
     public static final String DEFAULT_MODEL = "opus";
@@ -145,6 +150,19 @@ public record ClaudeConfig(
     /** Half of {@link #DEFAULT_ANALYSIS_TIMEOUT_SECONDS} -- same reasoning as {@link
      * #DEFAULT_ANALYSIS_SECOND_ATTEMPT_MAX_TURNS}. */
     public static final int DEFAULT_ANALYSIS_SECOND_ATTEMPT_TIMEOUT_SECONDS = 900;
+    /**
+     * The implementation turn budget for a group the Vulnerability Analysis Engineer itself classified
+     * {@link com.tungsten.depbot.assessment.ImplementationBudget#EXTENDED} -- a real migration (crossing a
+     * major framework/API boundary, expected source/config compatibility edits) that a real pilot showed
+     * running out of {@link #DEFAULT_IMPLEMENTATION_MAX_TURNS} mid-fix, not because reasoning failed but
+     * because the budget was sized for an ordinary version bump. Used for every attempt of an EXTENDED
+     * group (including the first), never only a later one, and never for a {@code STANDARD} group.
+     */
+    public static final int DEFAULT_IMPLEMENTATION_EXTENDED_MAX_TURNS = 120;
+    /** Twice {@link #DEFAULT_IMPLEMENTATION_TIMEOUT_SECONDS} -- same reasoning as
+     *  {@link #DEFAULT_IMPLEMENTATION_EXTENDED_MAX_TURNS}: a genuinely larger budget needs a wall-clock
+     *  cap that can actually accommodate it. */
+    public static final int DEFAULT_IMPLEMENTATION_EXTENDED_TIMEOUT_SECONDS = 1800;
 
     /**
      * A config with no reason to give any role its own turn budget or timeout -- most call sites,
@@ -161,7 +179,30 @@ public record ClaudeConfig(
                 Duration.ofSeconds(DEFAULT_IMPLEMENTATION_TIMEOUT_SECONDS),
                 Duration.ofSeconds(DEFAULT_HUMAN_REVIEW_TIMEOUT_SECONDS),
                 DEFAULT_ANALYSIS_SECOND_ATTEMPT_MAX_TURNS,
-                Duration.ofSeconds(DEFAULT_ANALYSIS_SECOND_ATTEMPT_TIMEOUT_SECONDS));
+                Duration.ofSeconds(DEFAULT_ANALYSIS_SECOND_ATTEMPT_TIMEOUT_SECONDS),
+                DEFAULT_IMPLEMENTATION_EXTENDED_MAX_TURNS,
+                Duration.ofSeconds(DEFAULT_IMPLEMENTATION_EXTENDED_TIMEOUT_SECONDS));
+    }
+
+    /**
+     * Backward-compatible shape from before {@code implementationExtendedMaxTurns}/{@code
+     * implementationExtendedTimeout} existed -- defaults both to their {@code DEFAULT_IMPLEMENTATION_EXTENDED_*}
+     * values. Kept so every existing caller that built a fully-specified config keeps compiling unchanged.
+     */
+    public ClaudeConfig(
+            String executable, String model, int maxTurns,
+            int analysisMaxTurns, int implementationMaxTurns, int humanReviewMaxTurns,
+            int analysisFinalizationMaxTurns, int implementationFinalizationMaxTurns,
+            int humanReviewFinalizationMaxTurns,
+            Duration timeout, Duration analysisTimeout, Duration implementationTimeout,
+            Duration humanReviewTimeout,
+            int analysisSecondAttemptMaxTurns, Duration analysisSecondAttemptTimeout) {
+        this(executable, model, maxTurns, analysisMaxTurns, implementationMaxTurns, humanReviewMaxTurns,
+                analysisFinalizationMaxTurns, implementationFinalizationMaxTurns, humanReviewFinalizationMaxTurns,
+                timeout, analysisTimeout, implementationTimeout, humanReviewTimeout,
+                analysisSecondAttemptMaxTurns, analysisSecondAttemptTimeout,
+                DEFAULT_IMPLEMENTATION_EXTENDED_MAX_TURNS,
+                Duration.ofSeconds(DEFAULT_IMPLEMENTATION_EXTENDED_TIMEOUT_SECONDS));
     }
 
     /** Reads the configuration from the real process environment. */
@@ -199,7 +240,11 @@ public record ClaudeConfig(
                 positiveInt(environment, CLAUDE_ANALYSIS_SECOND_ATTEMPT_MAX_TURNS,
                         DEFAULT_ANALYSIS_SECOND_ATTEMPT_MAX_TURNS),
                 Duration.ofSeconds(positiveInt(environment, CLAUDE_ANALYSIS_SECOND_ATTEMPT_TIMEOUT_SECONDS,
-                        DEFAULT_ANALYSIS_SECOND_ATTEMPT_TIMEOUT_SECONDS)));
+                        DEFAULT_ANALYSIS_SECOND_ATTEMPT_TIMEOUT_SECONDS)),
+                positiveInt(environment, CLAUDE_IMPLEMENTATION_EXTENDED_MAX_TURNS,
+                        DEFAULT_IMPLEMENTATION_EXTENDED_MAX_TURNS),
+                Duration.ofSeconds(positiveInt(environment, CLAUDE_IMPLEMENTATION_EXTENDED_TIMEOUT_SECONDS,
+                        DEFAULT_IMPLEMENTATION_EXTENDED_TIMEOUT_SECONDS)));
     }
 
     /** The turn budget for {@code phase} -- every phase has its own; there is no shared fallback. */

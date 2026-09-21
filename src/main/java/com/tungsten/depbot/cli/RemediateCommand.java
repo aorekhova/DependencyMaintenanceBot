@@ -32,6 +32,11 @@ import com.tungsten.depbot.report.actionable.ActionableReport;
 import com.tungsten.depbot.run.RemediationRunService;
 import com.tungsten.depbot.run.RunManifestWriteException;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -80,6 +85,7 @@ public final class RemediateCommand {
     private final CohortsIndexJsonReader cohortsIndexJsonReader = new CohortsIndexJsonReader();
     private final RepositoryRefreshOutcomeJsonReader repositoryRefreshOutcomeJsonReader =
             new RepositoryRefreshOutcomeJsonReader();
+    private final JsonMapper inputReportMapper = JsonMapper.builder().build();
 
     /**
      * @param publicationService drives GitLab publication straight after a successful pipeline, reusing
@@ -138,6 +144,26 @@ public final class RemediateCommand {
      *                            publishable afterward via the standalone {@code publish --run <run-id>}.
      */
     public ExitCode run(String dependencyFilterRaw, boolean noPublish) {
+        return run(dependencyFilterRaw, noPublish, null);
+    }
+
+    /**
+     * @param dependencyFilterRaw the raw {@code --dependency} value ({@code groupId:artifactId}), or
+     *                            {@code null}/blank to work through every library in the report
+     * @param noPublish           see {@link #run(String, boolean)}
+     * @param inputReportPath     {@code --input-report <path>} -- when non-{@code null}, an externally
+     *                            supplied actionable report (this application's own {@link ActionableReport}
+     *                            JSON shape, e.g. built from a Mend UI export for a project this environment
+     *                            has no Mend API access to) is validated and copied to exactly the path
+     *                            {@link #sourceReader} reads from, and {@link #scanCommand} -- the only
+     *                            component that ever calls Mend -- is not run at all. Everything
+     *                            downstream ({@code plan-remediation}, grouping, both Claude roles, Plan
+     *                            Conformance, dependency validation, the full build, Jenkins, publication,
+     *                            reporting) runs completely unchanged either way, since it only ever reads
+     *                            that same published file back from disk. {@code null}/blank works through
+     *                            {@link #scanCommand} exactly as before.
+     */
+    public ExitCode run(String dependencyFilterRaw, boolean noPublish, Path inputReportPath) {
         DependencyCoordinates pilotFilter;
         try {
             pilotFilter = parseFilter(dependencyFilterRaw);
@@ -146,9 +172,18 @@ public final class RemediateCommand {
             return ExitCode.USAGE_ERROR;
         }
 
-        ExitCode scanResult = scanCommand.run();
-        if (scanResult != ExitCode.SUCCESS) {
-            return scanResult;
+        if (inputReportPath != null) {
+            try {
+                importInputReport(inputReportPath);
+            } catch (RemediationSourceException e) {
+                reporter.printRemediationSourceError(e.getMessage());
+                return ExitCode.REMEDIATION_SOURCE_ERROR;
+            }
+        } else {
+            ExitCode scanResult = scanCommand.run();
+            if (scanResult != ExitCode.SUCCESS) {
+                return scanResult;
+            }
         }
         ExitCode planResult = planCommand.run();
         if (planResult != ExitCode.SUCCESS) {
@@ -179,6 +214,45 @@ public final class RemediateCommand {
         DependencyCoordinates coordinates = DependencyCoordinates.parse(dependencyFilterRaw);
         reporter.printPilotDependencyFilter(coordinates.coordinates());
         return coordinates;
+    }
+
+    /**
+     * Validates {@code inputReportPath} as this application's own {@link ActionableReport} JSON shape and
+     * copies its exact original content -- not a re-serialization -- to {@link
+     * RemediationSourceReader#actionableReportPath()}, the one path {@link #sourceReader} and therefore
+     * {@link #planCommand} and everything after it ever reads from. {@link #scanCommand} is deliberately
+     * never invoked on this path; it is the only component in the whole pipeline that calls Mend.
+     *
+     * @throws RemediationSourceException if the file is missing, unreadable, not valid JSON matching
+     *                                     {@link ActionableReport}, or the destination could not be written
+     */
+    private void importInputReport(Path inputReportPath) {
+        if (!Files.exists(inputReportPath)) {
+            throw new RemediationSourceException("Could not find --input-report file " + inputReportPath);
+        }
+        String content;
+        try {
+            content = Files.readString(inputReportPath, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new RemediationSourceException("Could not read --input-report file " + inputReportPath, e);
+        }
+        try {
+            inputReportMapper.readValue(content, ActionableReport.class);
+        } catch (JsonProcessingException e) {
+            throw new RemediationSourceException(
+                    "Could not parse --input-report file " + inputReportPath + " as an actionable report", e);
+        }
+
+        Path destination = sourceReader.actionableReportPath();
+        try {
+            if (destination.getParent() != null) {
+                Files.createDirectories(destination.getParent());
+            }
+            Files.writeString(destination, content, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new RemediationSourceException("Could not write " + destination, e);
+        }
+        reporter.printInputReportUsed(inputReportPath);
     }
 
     /**

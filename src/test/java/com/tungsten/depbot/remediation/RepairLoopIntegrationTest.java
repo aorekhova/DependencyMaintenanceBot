@@ -30,6 +30,9 @@ import com.tungsten.depbot.run.RemediationRunService;
 import com.tungsten.depbot.run.RunPaths;
 import com.tungsten.depbot.git.RemediationChangeCommitter;
 import com.tungsten.depbot.git.RemediationDiffPolicy;
+import com.tungsten.depbot.implementation.PlanConformanceResult;
+import com.tungsten.depbot.validation.RemediationValidationGate;
+import com.tungsten.depbot.validation.ValidationOutcome;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -85,6 +88,12 @@ class RepairLoopIntegrationTest {
     }
 
     private VulnerabilityRemediationService service(FakeClaude fake, FakeJenkinsClient jenkinsClient) {
+        return service(fake, jenkinsClient, Implementations.passingGate());
+    }
+
+    private VulnerabilityRemediationService service(
+            FakeClaude fake, FakeJenkinsClient jenkinsClient,
+            com.tungsten.depbot.validation.RemediationValidationGate dependencyGate) {
         ClaudeConfig config = new ClaudeConfig(fake.executable().toString(), "opus", 20, Duration.ofSeconds(60));
         RemediationRunService runService = new RemediationRunService(FIXED_CLOCK, runsRoot());
         ClaudeCodeExecutor executor = new ClaudeCodeExecutor(config, new ClaudeProcessRunner(), runService, FIXED_CLOCK);
@@ -102,7 +111,7 @@ class RepairLoopIntegrationTest {
                 new RemediationImplementationService(executor, config, runService,
                         new ImplementationPromptRenderer(), git,
                         new RemediationChangeCommitter(git, new RemediationDiffPolicy()),
-                        Implementations.passingGate(), Implementations.passingBuildGate()),
+                        dependencyGate, Implementations.passingBuildGate()),
                 new JenkinsValidationService(jenkinsClient, jenkinsConfig, git, runService),
                 new HumanReviewService(executor, config, runService, new HumanReviewPromptRenderer()),
                 runService);
@@ -149,6 +158,59 @@ class RepairLoopIntegrationTest {
                       "automationSafetyReason": "no coordinated dependency is involved",
                       "implementationPlan": ["raise the version"],
                       "validationPlan": ["run dependency:tree"],
+                      "plannedChanges": [
+                        {
+                          "dependencyCoordinates": "%s",
+                          "currentVersion": "1.0",
+                          "targetVersion": "1.1",
+                          "affectedFile": "pom.xml",
+                          "changeType": "VERSION_BUMP",
+                          "reason": "raises the version to close the CVE"
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """.formatted(coordinates, groupId, groupId, coordinates, coordinates);
+    }
+
+    /** As {@link #analysisJson(String, String)}, but the group is classified {@code EXTENDED} -- run
+     *  20260919-221201-636b49's implementationBudget fix: an EXTENDED group may reach a third attempt,
+     *  each at the EXTENDED turn/timeout budget, when the first two both fail. */
+    private static String analysisJsonExtended(String coordinates, String groupId) {
+        return """
+                {
+                  "schemaVersion": "1.0",
+                  "findings": [
+                    {
+                      "coordinates": "%s",
+                      "vulnerabilityIds": ["CVE-2026-X"],
+                      "summary": "needs remediation",
+                      "conclusion": "REMEDIATION_REQUIRED",
+                      "remediationGroupId": "%s",
+                      "evidence": ["evidence"]
+                    }
+                  ],
+                  "remediationGroups": [
+                    {
+                      "groupId": "%s",
+                      "memberCoordinates": ["%s"],
+                      "groupingReason": "a single, unrelated finding",
+                      "sourceRef": "origin/release/9.2",
+                      "sourceCommitSha": "0123456789abcdef0123456789abcdef01234567",
+                      "origin": "PROPERTY",
+                      "dependencyRelationship": "declared directly",
+                      "observedVersion": "1.0",
+                      "recommendedRemediation": "migrate to the new major version",
+                      "recommendedTargetVersion": "1.1",
+                      "affectedFiles": ["pom.xml"],
+                      "impactScore": 8,
+                      "impactReason": "a real migration across a major API boundary",
+                      "automationSafety": "AUTOMATIC_ALLOWED",
+                      "automationSafetyReason": "no coordinated dependency is involved",
+                      "implementationPlan": ["migrate to the new major version"],
+                      "validationPlan": ["run dependency:tree"],
+                      "implementationBudget": "EXTENDED",
                       "plannedChanges": [
                         {
                           "dependencyCoordinates": "%s",
@@ -349,5 +411,284 @@ class RepairLoopIntegrationTest {
         assertEquals(2, artifactPaths.stream().distinct().count(),
                 "each attempt's own artifact path must be distinct, so the Human Review dossier's evidence "
                         + "trail can reference either attempt independently: " + artifactPaths);
+    }
+
+    // ---- implementationBudget: EXTENDED groups may reach a third attempt (run 20260919-221201-636b49) ----
+
+    @Test
+    @DisplayName("an EXTENDED group reaches a third attempt when the first two both fail -- a STANDARD "
+            + "group never would (see rejectedOnBothAttemptsProducesFullDossierAndNoCommit above)")
+    void extendedGroupReachesThirdAttemptAfterTwoFailures() throws Exception {
+        VulnerabilityWorkItem a = workItem("artifact-a", "CRITICAL");
+        FakeClaude fake = FakeClaude.in(tempDir)
+                .respondingTo(ClaudePhase.ASSESSMENT, Assessments.claudeOutput(
+                        Assessments.answerContaining(analysisJsonExtended("com.example:artifact-a", "g-a"))))
+                .respondingTo(ClaudePhase.IMPLEMENTATION, Assessments.claudeOutput(
+                        Assessments.answerContaining(Implementations.completedJson())))
+                .creatingFileOnInvocation(2, "pom.xml", pomWithVersion("artifact-a", "1.1"))
+                .creatingFileOnInvocation(3, "pom.xml", pomWithVersion("artifact-a", "1.1"))
+                .creatingFileOnInvocation(4, "pom.xml", pomWithVersion("artifact-a", "1.1"))
+                .build();
+
+        // Attempt 1's pair is calls 1-2 (fail call 2); attempt 2's pair is calls 3-4 (fail call 4);
+        // attempt 3's pair (calls 5-6) falls through to the default canned SUCCESS result.
+        FakeJenkinsClient jenkins = new FakeJenkinsClient();
+        jenkins.respondOnCallNumber(2, new JenkinsBuildResult(
+                JenkinsValidationStatus.FAILED, 2, "https://jenkins.example.invalid/job/x/2/", 10L,
+                "Jenkins reported result FAILURE"));
+        jenkins.respondOnCallNumber(4, new JenkinsBuildResult(
+                JenkinsValidationStatus.FAILED, 4, "https://jenkins.example.invalid/job/x/4/", 10L,
+                "Jenkins reported result FAILURE"));
+
+        List<VulnerabilityRemediationOutcome> outcomes = service(fake, jenkins).remediateAll(RUN_ID, List.of(a));
+
+        List<String> commits = commitsAheadOfS0();
+        assertEquals(1, commits.size(),
+                "exactly one commit -- attempts 1 and 2's own candidates were discarded: " + commits);
+        assertEquals(verifiedSha, parentOf(commits.get(0)),
+                "attempt 3 must be cut fresh from acceptedTip (S0), never stacked on a failed commit");
+
+        assertEquals(1, outcomes.size());
+        assertTrue(outcomes.get(0).committed());
+
+        List<String> phases = fake.recordedPhaseSequence();
+        assertEquals(3, phases.stream().filter(p -> p.equals("implementation")).count(),
+                "an EXTENDED group may reach three implementation attempts when the first two both fail, "
+                        + "unlike a STANDARD group's hard two-attempt limit");
+
+        String unitId = RunPaths.unitId("critical", "com.example", "artifact-a");
+        Path unitDirectory = runsRoot().resolve(RUN_ID).resolve("units").resolve(unitId).resolve("implementation");
+        assertTrue(Files.exists(unitDirectory.resolve("attempt-1").resolve("prompt.md")));
+        assertTrue(Files.exists(unitDirectory.resolve("attempt-2").resolve("prompt.md")));
+        assertTrue(Files.exists(unitDirectory.resolve("attempt-3").resolve("prompt.md")),
+                "the third, EXTENDED-only attempt must have its own artifact directory, never overwriting "
+                        + "the first two");
+
+        GroupState groupState = new GroupStateJsonReader().read(
+                runsRoot().resolve(RUN_ID).resolve("units").resolve(unitId).resolve("group-state.json"));
+        assertEquals(3, groupState.implementationAttempts().size(),
+                "the audit trail must carry all three attempts for an EXTENDED group");
+    }
+
+    // ---- Bug 1 (run 20260920-031107-148632): a companion-file exclusion added in direct response to a
+    // ---- real DEPENDENCY_VALIDATION failure is accepted as a narrow scope extension, not rejected as an
+    // ---- unauthorized file change -----------------------------------------------------------------------
+
+    private static final String JSON_LIB_COORDINATES = "net.sf.json-lib:json-lib";
+
+    private static VulnerabilityWorkItem jsonLibWorkItem() {
+        var library = Assessments.library("net.sf.json-lib", "json-lib", "2.4");
+        return new VulnerabilityWorkItem("net.sf.json-lib", "json-lib", "2.4", "CRITICAL", "2.4",
+                List.of(Assessments.finding("CVE-2026-JSONLIB", "critical",
+                        library, "Exclude net.sf.json-lib:json-lib")));
+    }
+
+    private static String jsonLibAnalysisJson() {
+        return """
+                {
+                  "schemaVersion": "1.0",
+                  "findings": [
+                    {
+                      "coordinates": "net.sf.json-lib:json-lib",
+                      "vulnerabilityIds": ["CVE-2026-JSONLIB"],
+                      "summary": "needs remediation",
+                      "conclusion": "REMEDIATION_REQUIRED",
+                      "remediationGroupId": "g-jsonlib",
+                      "evidence": ["evidence"]
+                    }
+                  ],
+                  "remediationGroups": [
+                    {
+                      "groupId": "g-jsonlib",
+                      "memberCoordinates": ["net.sf.json-lib:json-lib"],
+                      "groupingReason": "a single, unrelated finding",
+                      "sourceRef": "origin/release/9.2",
+                      "sourceCommitSha": "0123456789abcdef0123456789abcdef01234567",
+                      "origin": "TRANSITIVE",
+                      "dependencyRelationship": "arrives transitively",
+                      "observedVersion": "2.4",
+                      "recommendedRemediation": "exclude the vulnerable transitive dependency",
+                      "recommendedTargetVersion": "2.4",
+                      "affectedFiles": ["pom.xml"],
+                      "impactScore": 2,
+                      "impactReason": "small change",
+                      "automationSafety": "AUTOMATIC_ALLOWED",
+                      "automationSafetyReason": "a narrow exclusion is sufficient",
+                      "implementationPlan": ["exclude net.sf.json-lib:json-lib in pom.xml"],
+                      "validationPlan": ["run dependency:tree"],
+                      "plannedChanges": [
+                        {
+                          "dependencyCoordinates": "com.example:webapp-core",
+                          "currentVersion": null,
+                          "targetVersion": null,
+                          "affectedFile": "pom.xml",
+                          "changeType": "EXCLUSION_ADDED",
+                          "excludedCoordinates": ["net.sf.json-lib:json-lib"],
+                          "reason": "excludes the vulnerable transitive dependency from webapp-core"
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """;
+    }
+
+    /** The root pom's own, plan-authorized exclusion -- present from attempt 1 onward, unrelated to the
+     *  companion module's own, separate transitive path. */
+    private static String rootPomWithJsonLibExcluded() {
+        return """
+                <project>
+                  <dependencies>
+                    <dependency>
+                      <groupId>com.example</groupId>
+                      <artifactId>webapp-core</artifactId>
+                      <version>1.0</version>
+                      <exclusions>
+                        <exclusion>
+                          <groupId>net.sf.json-lib</groupId>
+                          <artifactId>json-lib</artifactId>
+                        </exclusion>
+                      </exclusions>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """;
+    }
+
+    /** The companion module's pom, as it exists at baseline -- pulling in json-lib transitively, with no
+     *  exclusion of its own yet. */
+    private static String testServicesPomBaseline() {
+        return """
+                <project>
+                  <dependencies>
+                    <dependency>
+                      <groupId>com.example</groupId>
+                      <artifactId>jaxbjsonsdo</artifactId>
+                      <version>2.2</version>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """;
+    }
+
+    /** As {@link #testServicesPomBaseline()}, but with attempt 2's own, narrow exclusion added --
+     *  structurally identical otherwise. */
+    private static String testServicesPomWithJsonLibExcluded() {
+        return """
+                <project>
+                  <dependencies>
+                    <dependency>
+                      <groupId>com.example</groupId>
+                      <artifactId>jaxbjsonsdo</artifactId>
+                      <version>2.2</version>
+                      <exclusions>
+                        <exclusion>
+                          <groupId>net.sf.json-lib</groupId>
+                          <artifactId>json-lib</artifactId>
+                        </exclusion>
+                      </exclusions>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """;
+    }
+
+    /** Adds {@code test-services/pom.xml} (see {@link #testServicesPomBaseline()}) to the {@code
+     *  release/9.2} baseline itself, and refreshes {@link #verifiedSha}/{@link #expectedBranch} to the new
+     *  tip -- so the companion module genuinely already existed before either implementation attempt ran,
+     *  exactly like the real run this test reproduces. */
+    private void addTestServicesModuleToBaseline() throws Exception {
+        GitTestRepos.run(repo, "git", "fetch", "-q", "origin", "release/9.2:refs/remotes/origin/release/9.2");
+        GitTestRepos.run(repo, "git", "checkout", "-q", "-B", "release/9.2", "refs/remotes/origin/release/9.2");
+        Path testServicesDir = repo.resolve("test-services");
+        Files.createDirectories(testServicesDir);
+        Files.writeString(testServicesDir.resolve("pom.xml"), testServicesPomBaseline(), StandardCharsets.UTF_8);
+        GitTestRepos.run(repo, "git", "add", "test-services/pom.xml");
+        GitTestRepos.run(repo, "git", "commit", "-q", "-m", "add test-services module");
+        GitTestRepos.run(repo, "git", "push", "-q", "origin", "HEAD:release/9.2");
+        GitTestRepos.run(repo, "git", "checkout", "-q", "master");
+        verifiedSha = GitTestRepos.shaOf(tempDir.resolve("origin.git"), "refs/heads/release/9.2");
+        expectedBranch = RemediationBranchName.forRun(RUN_ID, SOURCE_REF, verifiedSha);
+    }
+
+    /** A dependency-validation gate driven purely by whether {@code test-services/pom.xml} has, by now,
+     *  gained its own exclusion for {@code net.sf.json-lib:json-lib} -- standing in for the real Maven
+     *  dependency-resolution gate, whose verdict in the actual run this test reproduces depended on exactly
+     *  that fact. */
+    private static RemediationValidationGate testServicesExclusionRequiredGate() {
+        return request -> {
+            Path testServicesPom = request.workspace().resolve("test-services").resolve("pom.xml");
+            if (Files.exists(testServicesPom)) {
+                try {
+                    String content = Files.readString(testServicesPom, StandardCharsets.UTF_8);
+                    if (content.contains("<exclusion>") && content.contains("json-lib")) {
+                        return ValidationOutcome.passed(
+                                "net.sf.json-lib:json-lib no longer resolves on the classpath",
+                                List.of("mvn", "-o", "-B", "dependency:tree"), "stub output");
+                    }
+                } catch (java.io.IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            }
+            return ValidationOutcome.failed(
+                    "TestServices -> jaxbjsonsdo:2.2 -> net.sf.json-lib:json-lib:2.4 remained on the "
+                            + "resolved classpath",
+                    List.of("mvn", "-o", "-B", "dependency:tree"), "stub output");
+        };
+    }
+
+    @Test
+    @DisplayName("attempt 1's real DEPENDENCY_VALIDATION failure lets attempt 2's own, narrow exclusion in "
+            + "an existing companion pom.xml be accepted as a scope extension -- not rejected as an "
+            + "unauthorized file change -- and the group is still routed to human review despite conforming")
+    void companionFileExclusionAfterDependencyValidationFailureIsAcceptedAsScopeExtension() throws Exception {
+        addTestServicesModuleToBaseline();
+
+        FakeClaude fake = FakeClaude.in(tempDir)
+                .respondingTo(ClaudePhase.ASSESSMENT, Assessments.claudeOutput(
+                        Assessments.answerContaining(jsonLibAnalysisJson())))
+                .respondingTo(ClaudePhase.IMPLEMENTATION, Assessments.claudeOutput(
+                        Assessments.answerContaining(Implementations.completedJson())))
+                .creatingFileOnInvocation(2, "pom.xml", rootPomWithJsonLibExcluded())
+                .creatingFileOnInvocation(3, "pom.xml", rootPomWithJsonLibExcluded())
+                .creatingFileOnInvocation(3, "test-services/pom.xml", testServicesPomWithJsonLibExcluded())
+                .build();
+
+        FakeJenkinsClient jenkins = new FakeJenkinsClient();
+
+        List<VulnerabilityRemediationOutcome> outcomes = service(fake, jenkins, testServicesExclusionRequiredGate())
+                .remediateAll(RUN_ID, List.of(jsonLibWorkItem()));
+
+        assertEquals(1, outcomes.size());
+        assertTrue(outcomes.get(0).committed(),
+                "attempt 2's own exclusion in the companion file must let the dependency-validation gate "
+                        + "pass and the change be committed, not rejected as an unauthorized file change");
+
+        List<String> phases = fake.recordedPhaseSequence();
+        assertEquals(2, phases.stream().filter(p -> p.equals("implementation")).count(),
+                "exactly two implementation attempts -- attempt 1's real DEPENDENCY_VALIDATION failure, "
+                        + "then attempt 2's accepted repair");
+
+        String unitId = RunPaths.unitId("critical", "net.sf.json-lib", "json-lib");
+        Path attempt2Directory = runsRoot().resolve(RUN_ID).resolve("units").resolve(unitId)
+                .resolve("implementation").resolve("attempt-2");
+        PlanConformanceResult planConformance = MAPPER.readValue(
+                Files.readString(attempt2Directory.resolve(RemediationImplementationService.PLAN_CONFORMANCE_FILE),
+                        StandardCharsets.UTF_8),
+                PlanConformanceResult.class);
+
+        assertTrue(planConformance.conformant(),
+                "the companion file's own exclusion-only change must not be scored as a violation: "
+                        + planConformance.violations());
+        assertTrue(planConformance.violations().isEmpty(), planConformance.violations().toString());
+        assertTrue(planConformance.scopeExtensions().stream().anyMatch(e -> e.contains("test-services/pom.xml")),
+                "the accepted extension must name the companion file it authorized: "
+                        + planConformance.scopeExtensions());
+
+        GroupState groupState = new GroupStateJsonReader().read(
+                runsRoot().resolve(RUN_ID).resolve("units").resolve(unitId).resolve("group-state.json"));
+        assertEquals(GroupFinalOutcomeKind.ACCEPTED_RISKY, groupState.finalOutcome().kind(),
+                "a scope-extended success must still be routed to human review despite conforming, never "
+                        + "treated as an ordinary, unconditionally auto-mergeable acceptance");
     }
 }

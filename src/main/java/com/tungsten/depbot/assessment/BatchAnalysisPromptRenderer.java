@@ -63,13 +63,15 @@ public final class BatchAnalysisPromptRenderer {
                   "automationSafetyReason": "why this is safe (or not) to trust to automation",
                   "implementationPlan": ["the steps you would carry out, in order"],
                   "validationPlan": ["how the result should be checked"],
+                  "implementationBudget": "STANDARD | EXTENDED",
                   "plannedChanges": [
                     {
-                      "dependencyCoordinates": "groupId:artifactId this specific edit is about",
+                      "dependencyCoordinates": "groupId:artifactId this specific edit is about -- for EXCLUSION_ADDED, this is the HOST dependency the exclusion is added to, never the coordinate being excluded",
                       "currentVersion": "the version currently in effect, or null",
                       "targetVersion": "the version this edit moves it to, or null when this is not a version bump",
                       "affectedFile": "the exact file this edit must land in, e.g. pom.xml",
                       "changeType": "VERSION_BUMP | DEPENDENCY_MANAGEMENT_ADDITION | EXCLUSION_ADDED | OTHER",
+                      "excludedCoordinates": ["groupId:artifactId being excluded -- required, and non-empty, for EXCLUSION_ADDED only; empty for every other changeType"],
                       "reason": "why this specific edit, in your words"
                     }
                   ]
@@ -116,6 +118,7 @@ public final class BatchAnalysisPromptRenderer {
         appendNoActionRequiredStandard(lines);
         appendVersionRangeWording(lines);
         appendPlannedChanges(lines);
+        appendImplementationBudgetGuidance(lines);
         appendExpectedOutput(lines);
 
         return redactor.redact(String.join("\n", lines) + "\n");
@@ -395,7 +398,10 @@ public final class BatchAnalysisPromptRenderer {
         lines.add("");
         lines.add("**Every single entry, with no exceptions, needs all of these fields:**");
         lines.add("");
-        lines.add("- `dependencyCoordinates` -- which coordinate this specific edit is about.");
+        lines.add("- `dependencyCoordinates` -- which coordinate this specific edit is about. **For "
+                + "`EXCLUSION_ADDED`, this is always the HOST dependency the exclusion is added to (the "
+                + "`<dependency>` element that gains an `<exclusions>` block), never the coordinate being "
+                + "excluded** -- see below.");
         lines.add("- `affectedFile` -- which exact file it must land in; without this, nothing downstream "
                 + "could ever verify it.");
         lines.add("- `currentVersion`/`targetVersion` -- where a version is actually involved (a plain "
@@ -415,7 +421,17 @@ public final class BatchAnalysisPromptRenderer {
         lines.add("- `DEPENDENCY_MANAGEMENT_ADDITION` -- a new `<dependencyManagement>` entry (or imported "
                 + "BOM pin) is being added, or an existing one's coordinates/scope change (not just its "
                 + "version -- a pure version change to an existing entry is `VERSION_BUMP`).");
-        lines.add("- `EXCLUSION_ADDED` -- a Maven `<exclusion>` is being added.");
+        lines.add("- `EXCLUSION_ADDED` -- a Maven `<exclusion>` is being added. `dependencyCoordinates` is "
+                + "the HOST dependency the exclusion is added to; the coordinate(s) actually being excluded "
+                + "go in `excludedCoordinates` -- a list, since one host can gain more than one exclusion at "
+                + "once. `excludedCoordinates` is required, and non-empty, for every `EXCLUSION_ADDED` "
+                + "entry, and must be empty for every other `changeType`. For example (illustrative only): "
+                + "to exclude both `com.example:transitive-a` and `com.example:transitive-b` from "
+                + "`com.example:host`, set `dependencyCoordinates` to `com.example:host` and "
+                + "`excludedCoordinates` to `[\"com.example:transitive-a\", \"com.example:transitive-b\"]`. "
+                + "The later structural check reads only `dependencyCoordinates` and `excludedCoordinates`, "
+                + "never `reason`'s prose -- naming the excluded coordinate(s) only in `reason` is the same "
+                + "as not naming them at all.");
         lines.add("- `OTHER` -- the edit is not one of the three machine-verifiable kinds above. Deliberately "
                 + "the weakest option: prefer a more specific value whenever one genuinely fits, and always "
                 + "give a concrete, specific `reason` -- a group whose plan is entirely `OTHER` will be "
@@ -445,6 +461,48 @@ public final class BatchAnalysisPromptRenderer {
                 + "separate declaration or control point for the Remediation Engineer to edit, and a later "
                 + "structural check verifying the diff against your plan would find nothing there to "
                 + "confirm.");
+        lines.add("");
+        lines.add("**The same coordinate at the same control point/file must never be declared two "
+                + "contradictory ways.** If `plannedChanges` names the same `dependencyCoordinates` in the "
+                + "same `affectedFile` more than once, every one of those entries must describe the same "
+                + "logical edit, consistently -- never one entry claiming `VERSION_BUMP` (an existing "
+                + "control point) and another claiming `DEPENDENCY_MANAGEMENT_ADDITION` (no control point "
+                + "existed yet) for what is really the same edit, and never two entries of the same "
+                + "`changeType` with two different target versions. This is unrelated to the same coordinate "
+                + "legitimately appearing in **different** files (e.g. a migration touching the root `pom.xml` "
+                + "and several module `pom.xml`s) -- that is normal and expected, since those are genuinely "
+                + "separate edits.");
+        lines.add("");
+    }
+
+    private static void appendImplementationBudgetGuidance(List<String> lines) {
+        lines.add("## Choose an implementationBudget for each remediation group");
+        lines.add("");
+        lines.add("`implementationBudget` is separate from `automationSafety`: `automationSafety` asks "
+                + "whether the *result* may be trusted to automation; `implementationBudget` asks how much "
+                + "*work* the Remediation Engineer is likely to need to get there. A group can be "
+                + "`AUTOMATIC_ALLOWED` and `EXTENDED` at once (a large, well-understood migration nobody "
+                + "needs to review), or `HUMAN_REVIEW_REQUIRED` and `STANDARD` (a small change a person "
+                + "still needs to look at for an unrelated reason).");
+        lines.add("");
+        lines.add("Set it to `STANDARD` for an ordinary version/property bump, a small BOM or "
+                + "dependencyManagement update, an exclusion, or a small Maven metadata fix -- anything that "
+                + "does not require application/source migration.");
+        lines.add("");
+        lines.add("Set it to `EXTENDED` when the remediation is a real migration: crossing a major "
+                + "framework/API boundary, expected Java/source compatibility edits, configuration/XML/plugin "
+                + "changes, a coordinate/package migration, several parts of the repository needing to "
+                + "change together, or a plan that explicitly includes compatibility adaptation.");
+        lines.add("");
+        lines.add("For example (illustrative only): raising `com.example:library-a` from `2.3` to `2.4` "
+                + "with no API changes is `STANDARD`. Migrating `com.example:framework-core` from `2.x` to "
+                + "`6.x` -- where the plan itself says application code and configuration must be adapted to "
+                + "the new API -- is `EXTENDED`, because the Remediation Engineer will need meaningfully more "
+                + "turns and time than an ordinary version bump to actually finish the compatibility work, "
+                + "not just to decide whether the change is safe.");
+        lines.add("");
+        lines.add("If you do not set `implementationBudget` at all, it is treated as `STANDARD` -- never "
+                + "assume `EXTENDED` grants extra room by default.");
         lines.add("");
     }
 

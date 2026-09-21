@@ -227,24 +227,6 @@ class CohortIntegrationFailureTest {
                 runsRoot().resolve(RUN_ID).resolve(CohortsIndexJsonReader.FILE_NAME));
     }
 
-    /** Mirrors {@code VulnerabilityRemediationService#cohortUnitId} for an ORDINARY (non-risky) cohort --
-     *  a short, stable hash of the branch name, not the branch name itself sanitised verbatim (see
-     *  pilot 20260908-220923-771c06: a directory name built from the full branch name was too long for
-     *  ordinary Windows tooling to read). */
-    private static String cohortUnitId(String branchName) {
-        try {
-            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(branchName.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder();
-            for (byte b : hash) {
-                hex.append(String.format("%02x", b));
-            }
-            return "cohort-" + hex.substring(0, 10);
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     @Test
     @DisplayName("every group individually accepted, but final integration Jenkins fails: dossier covers "
             + "the whole set, anchored to S0, never blaming one group; each accepted group's own "
@@ -281,37 +263,34 @@ class CohortIntegrationFailureTest {
                 "a cohort whose final integration gate failed must never be marked ready to publish");
         assertEquals(2, outcomes.size());
 
-        String unitId = "integration__" + cohortUnitId(expectedBranch);
-        Path dossierPath = runsRoot().resolve(RUN_ID).resolve("units").resolve(unitId)
-                .resolve("human-review").resolve("attempt-1").resolve("cohort-integration-failure.json");
-        assertTrue(Files.exists(dossierPath), "the cohort-level dossier must be persisted");
+        // ONE REMEDIATION GROUP = ONE EXTERNAL PUBLICATION UNIT (run 20260919-221201-636b49): even though
+        // the failure is a shared, non-attributable, cohort-level fact, each group gets its OWN separate
+        // Human Review report/dossier file -- never one combined unit for the whole cohort.
+        String unitIdA = "integration__" + RunPaths.unitId("critical", "com.example", "artifact-a");
+        String unitIdB = "integration__" + RunPaths.unitId("high", "com.example", "artifact-b");
 
-        // Windows-path-oriented regression (production incident, pilot 20260908-220923-771c06):
-        // PowerShell's Compress-Archive failed to recurse into a run directory once a unit directory name
-        // repeated the full run id, a fully sanitised source ref, and a branch prefix. The unit directory
-        // name itself -- not the whole path, which also depends on the caller's own checkout location --
-        // must stay short regardless of how long the source ref or branch name that produced it was.
-        assertTrue(unitId.length() <= 40,
-                "unit directory names must stay short and Windows-tool-friendly, not repeat the run id, "
-                        + "the full sanitised source ref or the branch prefix already implied by the parent "
-                        + "run directory: " + unitId);
-        CohortIntegrationFailureOutcome dossier = MAPPER.readValue(
-                Files.readString(dossierPath, StandardCharsets.UTF_8), CohortIntegrationFailureOutcome.class);
+        CohortIntegrationFailureOutcome dossierA = readDossier(unitIdA);
+        CohortIntegrationFailureOutcome dossierB = readDossier(unitIdB);
 
-        assertEquals(verifiedSha, dossier.verifiedSourceSha(), "anchored to S0, never a per-group base SHA");
-        assertEquals(2, dossier.acceptedGroupIds().size());
-        assertTrue(dossier.acceptedGroupIds().containsAll(List.of("g-a", "g-b")));
-        assertNotNull(dossier.cumulativePatch());
-        assertTrue(dossier.cumulativePatch().contains("artifact-a") && dossier.cumulativePatch().contains("artifact-b"),
-                "the cumulative patch must cover both accepted groups' own changes: " + dossier.cumulativePatch());
-        assertNotNull(dossier.reproductionInstructions());
-        assertTrue(dossier.reproductionInstructions().contains(verifiedSha),
-                "reproduction instructions must anchor to S0: " + dossier.reproductionInstructions());
-
-        assertNotNull(dossier.attributionNote());
-        assertTrue(dossier.attributionNote().contains("g-a") && dossier.attributionNote().contains("g-b"),
-                "the attribution note must name the whole accepted set, not isolate one group: "
-                        + dossier.attributionNote());
+        // The two groups' own dossier files carry the exact same shared evidence -- same acceptedGroupIds,
+        // same cumulative patch, same attribution note -- confirming the evidence itself is genuinely
+        // shared, only the publication unit is per-group.
+        for (CohortIntegrationFailureOutcome dossier : List.of(dossierA, dossierB)) {
+            assertEquals(verifiedSha, dossier.verifiedSourceSha(), "anchored to S0, never a per-group base SHA");
+            assertEquals(2, dossier.acceptedGroupIds().size());
+            assertTrue(dossier.acceptedGroupIds().containsAll(List.of("g-a", "g-b")));
+            assertNotNull(dossier.cumulativePatch());
+            assertTrue(dossier.cumulativePatch().contains("artifact-a")
+                            && dossier.cumulativePatch().contains("artifact-b"),
+                    "the cumulative patch must cover both accepted groups' own changes: " + dossier.cumulativePatch());
+            assertNotNull(dossier.reproductionInstructions());
+            assertTrue(dossier.reproductionInstructions().contains(verifiedSha),
+                    "reproduction instructions must anchor to S0: " + dossier.reproductionInstructions());
+            assertNotNull(dossier.attributionNote());
+            assertTrue(dossier.attributionNote().contains("g-a") && dossier.attributionNote().contains("g-b"),
+                    "the attribution note must name the whole accepted set, not isolate one group: "
+                            + dossier.attributionNote());
+        }
 
         // Each accepted group's own group-state.json is stamped with the cohort-level outcome.
         GroupStateJsonReader groupStateReader = new GroupStateJsonReader();
@@ -327,16 +306,31 @@ class CohortIntegrationFailureTest {
                     + "preserved, not lost by the later patch");
         }
 
-        // The rendered Human Review report contains the cohort-level facts.
-        Path humanReviewReportPath = runsRoot().resolve(RUN_ID).resolve("units").resolve(unitId)
+        // Each group's own rendered Human Review report contains the shared cohort-level facts, and each
+        // is its own, separate report -- never a report naming the OTHER group as if combined.
+        HumanReviewReport reportA = readHumanReviewReport(unitIdA);
+        String renderedA = new HumanReviewReportMarkdownRenderer().render(reportA, null, dossierA);
+        assertTrue(renderedA.contains("g-a") && renderedA.contains("g-b"),
+                "the shared, non-attributable evidence still names both groups even in group A's own report: "
+                        + renderedA);
+        assertTrue(renderedA.contains("Cohort publication blocked"), renderedA);
+
+        HumanReviewReport reportB = readHumanReviewReport(unitIdB);
+        String renderedB = new HumanReviewReportMarkdownRenderer().render(reportB, null, dossierB);
+        assertTrue(renderedB.contains("Cohort publication blocked"), renderedB);
+    }
+
+    private CohortIntegrationFailureOutcome readDossier(String unitId) throws Exception {
+        Path dossierPath = runsRoot().resolve(RUN_ID).resolve("units").resolve(unitId)
+                .resolve("human-review").resolve("attempt-1").resolve("cohort-integration-failure.json");
+        assertTrue(Files.exists(dossierPath), "the per-group dossier must be persisted for " + unitId);
+        return MAPPER.readValue(Files.readString(dossierPath, StandardCharsets.UTF_8),
+                CohortIntegrationFailureOutcome.class);
+    }
+
+    private HumanReviewReport readHumanReviewReport(String unitId) throws Exception {
+        Path path = runsRoot().resolve(RUN_ID).resolve("units").resolve(unitId)
                 .resolve("human-review").resolve("attempt-1").resolve("human-review-report.json");
-        HumanReviewReport humanReviewReport = MAPPER.readValue(
-                Files.readString(humanReviewReportPath, StandardCharsets.UTF_8), HumanReviewReport.class);
-        String rendered = new HumanReviewReportMarkdownRenderer().render(humanReviewReport, null, dossier);
-        assertTrue(rendered.contains("g-a") && rendered.contains("g-b"), rendered);
-        // Heading text updated by the decision-first renderer redesign (stage 10) -- the underlying
-        // invariant (the cohort-level facts are rendered, never attributed to one specific group) is
-        // unchanged, just under a new title/section structure.
-        assertTrue(rendered.contains("Cohort publication blocked"), rendered);
+        return MAPPER.readValue(Files.readString(path, StandardCharsets.UTF_8), HumanReviewReport.class);
     }
 }

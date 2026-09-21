@@ -5,10 +5,13 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.tungsten.depbot.claude.JsonAnswerExtractor;
+import com.tungsten.depbot.implementation.PlanConformanceGate;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -37,6 +40,19 @@ public final class BatchAnalysisParser {
      *                                  bound, or it does not satisfy what its own findings/groups require
      */
     public BatchAnalysis parse(String answerText) {
+        return parse(answerText, null);
+    }
+
+    /**
+     * As {@link #parse(String)}, but additionally checks each remediation group's own {@code
+     * plannedChanges} for a self-contradiction against the real POM structure in {@code workspace} (see
+     * {@link #validatePlannedChangesConsistency}) -- the workspace-less overload is kept only for callers
+     * that genuinely have no repository to check against (e.g. pure-JSON unit tests of this class).
+     *
+     * @param workspace the checked-out repository the analysis investigated, or {@code null} to skip the
+     *                  mechanical control-point check (structural/schema validation still runs)
+     */
+    public BatchAnalysis parse(String answerText, Path workspace) {
         if (answerText == null || answerText.isBlank()) {
             throw new AssessmentParseException(
                     "The analysis produced no answer text to read.", AssessmentParseException.Kind.MISSING_ANALYSIS);
@@ -59,8 +75,124 @@ public final class BatchAnalysisParser {
                     AssessmentParseException.Kind.MALFORMED_ANALYSIS, e);
         }
 
+        for (AnalysisRemediationGroup group : analysis.remediationGroups()) {
+            validatePlannedChangesConsistency(group, workspace);
+        }
         validate(analysis);
         return analysis;
+    }
+
+    /**
+     * Flags a remediation group whose own {@code plannedChanges} describes the same logical Maven control
+     * point two contradictory ways -- thrown immediately, as its own {@link
+     * AssessmentParseException.Kind#CONTRADICTORY_PLANNED_CHANGES}, separately from the batched structural
+     * problems {@link #validate} collects, so it can be made narrowly eligible for the bounded
+     * schema-repair call ({@code BatchAnalysisService.isSchemaRepairEligible}) without also making an
+     * ordinary {@code ANALYSIS_VALIDATION_FAILED} repair-eligible.
+     *
+     * <p>{@code (dependencyCoordinates, affectedFile)} is only ever a <em>candidate</em> filter here, never
+     * the trigger by itself -- the same coordinate can legitimately exist at more than one real Maven
+     * control point within one file (a {@code dependencyManagement} entry, a direct {@code <dependency>}
+     * declaration, ...), and such edits are not automatically contradictory just because they share a
+     * file. Two checks, in order:
+     *
+     * <ol>
+     *   <li>Two entries of the <em>same</em> {@code changeType} but a different {@code targetVersion} for
+     *       the same {@code (coordinate, file)} candidate -- contradictory on its own terms, regardless of
+     *       which control point either targets, since it is the same kind of edit claiming two different
+     *       end states. No repository access needed.</li>
+     *   <li>A {@code VERSION_BUMP} and a {@code DEPENDENCY_MANAGEMENT_ADDITION} for the same
+     *       {@code (coordinate, file)} candidate -- these two types make opposite claims about whether an
+     *       effective {@code dependencyManagement}/BOM entry already exists. Mechanically verified (never
+     *       guessed) against {@code workspace} by reusing {@code PlanConformanceGate}'s own scoped POM
+     *       discovery: if the file already has a direct {@code <dependency>} for this coordinate, the
+     *       {@code VERSION_BUMP} plausibly targets that instead, and the two entries can legitimately
+     *       coexist (not flagged); otherwise, whichever entry the real POM structure disproves is the
+     *       contradiction.</li>
+     * </ol>
+     */
+    private static void validatePlannedChangesConsistency(AnalysisRemediationGroup group, Path workspace) {
+        record Key(String coordinates, String file) {
+        }
+
+        Map<Key, List<PlannedDependencyChange>> byControlPointCandidate = new LinkedHashMap<>();
+        for (PlannedDependencyChange change : group.plannedChanges()) {
+            byControlPointCandidate
+                    .computeIfAbsent(new Key(change.dependencyCoordinates(), change.affectedFile()),
+                            key -> new ArrayList<>())
+                    .add(change);
+        }
+
+        for (Map.Entry<Key, List<PlannedDependencyChange>> entry : byControlPointCandidate.entrySet()) {
+            List<PlannedDependencyChange> changes = entry.getValue();
+            if (changes.size() < 2) {
+                continue;
+            }
+            Key key = entry.getKey();
+
+            for (int i = 0; i < changes.size(); i++) {
+                for (int j = i + 1; j < changes.size(); j++) {
+                    PlannedDependencyChange a = changes.get(i);
+                    PlannedDependencyChange b = changes.get(j);
+                    if (a.changeType() == b.changeType()
+                            && !java.util.Objects.equals(a.targetVersion(), b.targetVersion())) {
+                        throw new AssessmentParseException(
+                                "remediation group \"" + group.groupId() + "\" plannedChanges lists "
+                                        + key.coordinates() + " in " + key.file() + " twice with the same "
+                                        + "changeType (" + a.changeType() + ") but different target versions "
+                                        + "(\"" + a.targetVersion() + "\" and \"" + b.targetVersion() + "\") -- "
+                                        + "one logical Maven edit cannot have two different declared end "
+                                        + "states; remove or merge the duplicate entry",
+                                AssessmentParseException.Kind.CONTRADICTORY_PLANNED_CHANGES);
+                    }
+                }
+            }
+
+            if (workspace == null) {
+                continue;
+            }
+            PlannedDependencyChange versionBump = firstOfType(changes, PlannedChangeType.VERSION_BUMP);
+            PlannedDependencyChange addition = firstOfType(changes, PlannedChangeType.DEPENDENCY_MANAGEMENT_ADDITION);
+            if (versionBump == null || addition == null) {
+                continue;
+            }
+            if (PlanConformanceGate.hasDirectDependency(workspace, key.file(), key.coordinates())) {
+                // The VERSION_BUMP plausibly targets this direct <dependency> declaration; a separate,
+                // genuinely new dependencyManagement entry for the same coordinate in the same file is a
+                // different, legitimately-coexisting control point -- not a contradiction.
+                continue;
+            }
+            boolean managedEntryAlreadyExists =
+                    PlanConformanceGate.hasEffectiveManagedEntry(workspace, key.file(), key.coordinates());
+            if (managedEntryAlreadyExists) {
+                throw new AssessmentParseException(
+                        "remediation group \"" + group.groupId() + "\" plannedChanges lists "
+                                + key.coordinates() + " in " + key.file() + " as a DEPENDENCY_MANAGEMENT_ADDITION, "
+                                + "but an effective dependencyManagement/BOM entry for it already exists there -- "
+                                + "an entry that already exists is a VERSION_BUMP of it, not a new addition; "
+                                + "remove or reclassify one of the two conflicting entries",
+                        AssessmentParseException.Kind.CONTRADICTORY_PLANNED_CHANGES);
+            } else {
+                throw new AssessmentParseException(
+                        "remediation group \"" + group.groupId() + "\" plannedChanges lists "
+                                + key.coordinates() + " in " + key.file() + " as a VERSION_BUMP, but no direct "
+                                + "<dependency> declaration and no effective dependencyManagement/BOM entry for "
+                                + "it currently exists there -- an entry that does not exist before this "
+                                + "remediation is a new dependencyManagement entry (DEPENDENCY_MANAGEMENT_ADDITION), "
+                                + "not a version bump of an existing one; remove or reclassify one of the two "
+                                + "conflicting entries",
+                        AssessmentParseException.Kind.CONTRADICTORY_PLANNED_CHANGES);
+            }
+        }
+    }
+
+    private static PlannedDependencyChange firstOfType(List<PlannedDependencyChange> changes, PlannedChangeType type) {
+        for (PlannedDependencyChange change : changes) {
+            if (change.changeType() == type) {
+                return change;
+            }
+        }
+        return null;
     }
 
     private static void validate(BatchAnalysis analysis) {

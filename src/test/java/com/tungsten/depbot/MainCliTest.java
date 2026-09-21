@@ -358,4 +358,65 @@ class MainCliTest {
         CapturedConsole console = new CapturedConsole();
         assertEquals(ExitCode.USAGE_ERROR, runRemediateWith(console, "remediate", "--nopublish"));
     }
+
+    // ---- --input-report -----------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("remediate --input-report <path> alone is a valid, recognised shape")
+    void remediateInputReportAloneIsValid() {
+        CapturedConsole console = new CapturedConsole();
+        assertNotEquals(ExitCode.USAGE_ERROR, runRemediateWith(
+                console, "remediate", "--input-report", reportDir.resolve("external.json").toString()));
+    }
+
+    @Test
+    @DisplayName("remediate --input-report <path> --no-publish is a valid, recognised shape")
+    void remediateInputReportThenNoPublishIsValid() {
+        CapturedConsole console = new CapturedConsole();
+        assertNotEquals(ExitCode.USAGE_ERROR, runRemediateWith(console, "remediate", "--input-report",
+                reportDir.resolve("external.json").toString(), "--no-publish"));
+    }
+
+    @Test
+    @DisplayName("remediate --dependency groupId:artifactId --input-report <path> --no-publish is a valid, "
+            + "recognised shape combining all three flags in order")
+    void remediateDependencyThenInputReportThenNoPublishIsValid() {
+        CapturedConsole console = new CapturedConsole();
+        assertNotEquals(ExitCode.USAGE_ERROR, runRemediateWith(console, "remediate",
+                "--dependency", "com.example:artifact",
+                "--input-report", reportDir.resolve("external.json").toString(),
+                "--no-publish"));
+    }
+
+    @Test
+    @DisplayName("--input-report with a missing path value is a usage error")
+    void remediateInputReportMissingValueIsRejected() {
+        CapturedConsole console = new CapturedConsole();
+        assertEquals(ExitCode.USAGE_ERROR, runRemediateWith(console, "remediate", "--input-report"));
+    }
+
+    @Test
+    @DisplayName("--no-publish before --input-report is not a recognised shape")
+    void remediateNoPublishBeforeInputReportIsRejected() {
+        CapturedConsole console = new CapturedConsole();
+        assertEquals(ExitCode.USAGE_ERROR, runRemediateWith(console, "remediate", "--no-publish",
+                "--input-report", reportDir.resolve("external.json").toString()));
+    }
+
+    @Test
+    @DisplayName("--input-report before --dependency is not a recognised shape")
+    void remediateInputReportBeforeDependencyIsRejected() {
+        CapturedConsole console = new CapturedConsole();
+        assertEquals(ExitCode.USAGE_ERROR, runRemediateWith(console, "remediate",
+                "--input-report", reportDir.resolve("external.json").toString(),
+                "--dependency", "com.example:artifact"));
+    }
+
+    @Test
+    @DisplayName("a misspelled --input-report flag is a usage error")
+    void remediateMisspelledInputReportIsRejected() {
+        CapturedConsole console = new CapturedConsole();
+        assertEquals(ExitCode.USAGE_ERROR, runRemediateWith(
+                console, "remediate", "--inputreport", reportDir.resolve("external.json").toString()));
+    }
 }

@@ -204,12 +204,12 @@ public final class RemediationImplementationService {
         Objects.requireNonNull(context, "context");
 
         Path directory = implementationDirectoryFor(context.runId(), context.unitId(), context.attemptNumber());
-        ClaudeRunRequest request = ClaudeRunRequest.of(
-                ClaudePhase.IMPLEMENTATION,
+        ClaudeRunRequest request = ClaudeRunRequest.ofImplementation(
                 context.workspace(),
                 promptRenderer.render(context),
                 directory,
-                config);
+                config,
+                context.group().effectiveImplementationBudget());
 
         // Captured before Claude ever touches the workspace, so a rollback can later tell an untracked
         // path the attempt itself created apart from one that was already sitting there -- never removed
@@ -300,7 +300,7 @@ public final class RemediationImplementationService {
         PlanConformanceGate.PhaseAResult phaseA = workCompleted && context.partialAnalysisState() == null
                 && !context.group().plannedChanges().isEmpty()
                 ? PlanConformanceGate.checkStructural(
-                        git, context.workspace(), context.branchBaseSha(), context.group())
+                        git, context.workspace(), context.branchBaseSha(), context.group(), context.repairContext())
                 : null;
 
         // The gate only has something to say about a change that claims to be a finished remediation.

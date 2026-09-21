@@ -25,7 +25,17 @@ public class AssessmentParseException extends RuntimeException {
     public enum Kind {
         MISSING_ANALYSIS,
         MALFORMED_ANALYSIS,
-        ANALYSIS_VALIDATION_FAILED
+        ANALYSIS_VALIDATION_FAILED,
+
+        /**
+         * The document parsed and satisfied every other structural requirement, but one remediation
+         * group's own {@code plannedChanges} contradicts itself -- the same logical Maven edit described
+         * with two incompatible {@code changeType}s or targets. Unlike {@link #ANALYSIS_VALIDATION_FAILED},
+         * this is deliberately eligible for the bounded schema-repair call: resolving it never requires
+         * re-investigating the vulnerability, only picking the {@code changeType} that matches reality and
+         * removing/merging the other entry.
+         */
+        CONTRADICTORY_PLANNED_CHANGES
     }
 
     private final Kind kind;

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -123,6 +124,47 @@ class BatchAnalysisPromptRendererTest {
         assertTrue(prompt.contains("a shared version property"), prompt);
         assertTrue(prompt.contains("never to the vulnerable artifact's own coordinates as a second, "
                 + "separate `VERSION_BUMP`"), prompt);
+    }
+
+    // ---- run 20260920-052841-210614: EXCLUSION_ADDED must structurally distinguish host from excluded --
+
+    @Test
+    @DisplayName("the prompt states dependencyCoordinates is the HOST for an EXCLUSION_ADDED entry, never "
+            + "the coordinate being excluded")
+    void promptStatesDependencyCoordinatesIsHostForExclusionAdded() {
+        String prompt = prompt();
+
+        assertTrue(prompt.contains("HOST dependency the exclusion is added to"), prompt);
+        assertTrue(prompt.contains("never the coordinate being excluded"), prompt);
+    }
+
+    @Test
+    @DisplayName("the prompt requires excludedCoordinates for EXCLUSION_ADDED and states the structural "
+            + "check never reads reason's prose")
+    void promptRequiresExcludedCoordinatesAndWarnsAgainstProse() {
+        String prompt = prompt();
+
+        assertTrue(prompt.contains("`excludedCoordinates`"), prompt);
+        assertTrue(prompt.contains("required, and non-empty, for every `EXCLUSION_ADDED` entry"), prompt);
+        assertTrue(prompt.contains("never `reason`'s prose"), prompt);
+    }
+
+    @Test
+    @DisplayName("the prompt's EXCLUSION_ADDED example is generic, naming no real production library")
+    void promptExclusionExampleIsGeneric() {
+        String prompt = prompt();
+
+        assertTrue(prompt.contains("com.example:host"), prompt);
+        assertTrue(prompt.contains("com.example:transitive-a"), prompt);
+        assertTrue(prompt.contains("com.example:transitive-b"), prompt);
+        assertFalse(prompt.contains("json-lib"), prompt);
+        assertFalse(prompt.contains("kordamp"), prompt);
+    }
+
+    @Test
+    @DisplayName("the output schema itself carries the excludedCoordinates field")
+    void outputSchemaCarriesExcludedCoordinatesField() {
+        assertTrue(prompt().contains("\"excludedCoordinates\""), prompt());
     }
 
     @Test

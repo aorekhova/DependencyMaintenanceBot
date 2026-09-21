@@ -3,19 +3,22 @@ package com.tungsten.depbot.publication;
 import com.tungsten.depbot.jenkins.JenkinsValidationOutcome;
 import com.tungsten.depbot.jenkins.JenkinsValidationStatus;
 import com.tungsten.depbot.remediation.CohortsIndex;
-import com.tungsten.depbot.remediation.RemediationCohort;
 import com.tungsten.depbot.remediation.RemediationReport;
 import com.tungsten.depbot.validation.ValidationStatus;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * {@link PublicationEligibility} is deliberately per-commit, with no cohort-wide gate layered on top (see
+ * its own javadoc, and run {@code 20260919-221201-636b49}'s correction: a hidden cohort-wide veto must
+ * never let one group's own failure block an independently successful sibling's publication).
+ */
 class PublicationEligibilityTest {
 
     private static final String COMMIT_SHA = "abc123";
@@ -39,37 +42,23 @@ class PublicationEligibilityTest {
                 dependencyStatus, fullBuildStatus, isolated, integration);
     }
 
-    private static CohortsIndex.Entry cohort(RemediationCohort.PublicationStatus status) {
-        return new CohortsIndex.Entry("remediation/run1/branch", "refs/remotes/origin/hotfix-2026.1",
-                "sourcesha", status, List.of(new CohortsIndex.Commit(GROUP_ID, COMMIT_SHA, "path")));
+    private static CohortsIndex.Commit commit() {
+        return new CohortsIndex.Commit(GROUP_ID, COMMIT_SHA, "path");
     }
 
     @Test
-    @DisplayName("a cohort with every bot-owned fact PASSED/SUCCESS is eligible")
-    void fullyPassingCohortIsEligible() {
+    @DisplayName("a commit with every bot-owned fact PASSED/SUCCESS is eligible")
+    void fullyPassingCommitIsEligible() {
         RemediationReport report = report(ValidationStatus.PASSED, ValidationStatus.PASSED, success(), success());
-        EligibilityResult result = PublicationEligibility.evaluate(
-                cohort(RemediationCohort.PublicationStatus.READY_TO_PUBLISH), Map.of(COMMIT_SHA, report));
+        EligibilityResult result = PublicationEligibility.evaluate(commit(), report);
 
         assertTrue(result.eligible(), result.reason());
     }
 
     @Test
-    @DisplayName("cohort publicationStatus other than READY_TO_PUBLISH is never eligible")
-    void nonReadyToPublishStatusIsIneligible() {
-        RemediationReport report = report(ValidationStatus.PASSED, ValidationStatus.PASSED, success(), success());
-        EligibilityResult result = PublicationEligibility.evaluate(
-                cohort(RemediationCohort.PublicationStatus.PUSHED), Map.of(COMMIT_SHA, report));
-
-        assertFalse(result.eligible());
-        assertTrue(result.reason().contains("READY_TO_PUBLISH"), result.reason());
-    }
-
-    @Test
     @DisplayName("a missing RemediationReport for a commit is never eligible")
     void missingReportIsIneligible() {
-        EligibilityResult result = PublicationEligibility.evaluate(
-                cohort(RemediationCohort.PublicationStatus.READY_TO_PUBLISH), Map.of());
+        EligibilityResult result = PublicationEligibility.evaluate(commit(), null);
 
         assertFalse(result.eligible());
         assertTrue(result.reason().contains(COMMIT_SHA), result.reason());
@@ -79,8 +68,7 @@ class PublicationEligibilityTest {
     @DisplayName("dependency validation not PASSED is never eligible")
     void dependencyValidationNotPassedIsIneligible() {
         RemediationReport report = report(ValidationStatus.FAILED, ValidationStatus.PASSED, success(), success());
-        EligibilityResult result = PublicationEligibility.evaluate(
-                cohort(RemediationCohort.PublicationStatus.READY_TO_PUBLISH), Map.of(COMMIT_SHA, report));
+        EligibilityResult result = PublicationEligibility.evaluate(commit(), report);
 
         assertFalse(result.eligible());
         assertTrue(result.reason().contains("dependency validation"), result.reason());
@@ -90,8 +78,7 @@ class PublicationEligibilityTest {
     @DisplayName("the full local build not PASSED is never eligible")
     void fullBuildNotPassedIsIneligible() {
         RemediationReport report = report(ValidationStatus.PASSED, ValidationStatus.FAILED, success(), success());
-        EligibilityResult result = PublicationEligibility.evaluate(
-                cohort(RemediationCohort.PublicationStatus.READY_TO_PUBLISH), Map.of(COMMIT_SHA, report));
+        EligibilityResult result = PublicationEligibility.evaluate(commit(), report);
 
         assertFalse(result.eligible());
         assertTrue(result.reason().contains("full local build"), result.reason());
@@ -100,15 +87,13 @@ class PublicationEligibilityTest {
     @Test
     @DisplayName("a missing or unsuccessful isolated Jenkins validation is never eligible")
     void missingOrFailedIsolatedJenkinsIsIneligible() {
-        EligibilityResult missing = PublicationEligibility.evaluate(
-                cohort(RemediationCohort.PublicationStatus.READY_TO_PUBLISH),
-                Map.of(COMMIT_SHA, report(ValidationStatus.PASSED, ValidationStatus.PASSED, null, success())));
+        EligibilityResult missing = PublicationEligibility.evaluate(commit(),
+                report(ValidationStatus.PASSED, ValidationStatus.PASSED, null, success()));
         assertFalse(missing.eligible());
         assertTrue(missing.reason().contains("Jenkins validation did not succeed"), missing.reason());
 
-        EligibilityResult failed = PublicationEligibility.evaluate(
-                cohort(RemediationCohort.PublicationStatus.READY_TO_PUBLISH),
-                Map.of(COMMIT_SHA, report(ValidationStatus.PASSED, ValidationStatus.PASSED, failure(), success())));
+        EligibilityResult failed = PublicationEligibility.evaluate(commit(),
+                report(ValidationStatus.PASSED, ValidationStatus.PASSED, failure(), success()));
         assertFalse(failed.eligible());
         assertTrue(failed.reason().contains("Jenkins validation did not succeed"), failed.reason());
     }
@@ -116,17 +101,32 @@ class PublicationEligibilityTest {
     @Test
     @DisplayName("a missing or unsuccessful final integration Jenkins validation is never eligible")
     void missingOrFailedIntegrationJenkinsIsIneligible() {
-        EligibilityResult missing = PublicationEligibility.evaluate(
-                cohort(RemediationCohort.PublicationStatus.READY_TO_PUBLISH),
-                Map.of(COMMIT_SHA, report(ValidationStatus.PASSED, ValidationStatus.PASSED, success(), null)));
+        EligibilityResult missing = PublicationEligibility.evaluate(commit(),
+                report(ValidationStatus.PASSED, ValidationStatus.PASSED, success(), null));
         assertFalse(missing.eligible());
         assertTrue(missing.reason().contains("final integration Jenkins"), missing.reason());
 
-        EligibilityResult failed = PublicationEligibility.evaluate(
-                cohort(RemediationCohort.PublicationStatus.READY_TO_PUBLISH),
-                Map.of(COMMIT_SHA, report(ValidationStatus.PASSED, ValidationStatus.PASSED, success(), failure())));
+        EligibilityResult failed = PublicationEligibility.evaluate(commit(),
+                report(ValidationStatus.PASSED, ValidationStatus.PASSED, success(), failure()));
         assertFalse(failed.eligible());
         assertTrue(failed.reason().contains("final integration Jenkins"), failed.reason());
+    }
+
+    @Test
+    @DisplayName("one group's own ineligibility is evaluated completely independently of a sibling's -- "
+            + "there is no cohort-wide gate to consult at all")
+    void oneFailingGroupDoesNotBlockSiblingGroupsEligibility() {
+        CohortsIndex.Commit siblingCommit = new CohortsIndex.Commit("g-sibling", "def456", "other-path");
+        RemediationReport failingReport =
+                report(ValidationStatus.FAILED, ValidationStatus.PASSED, success(), success());
+        RemediationReport passingReport =
+                report(ValidationStatus.PASSED, ValidationStatus.PASSED, success(), success());
+
+        EligibilityResult failing = PublicationEligibility.evaluate(commit(), failingReport);
+        EligibilityResult passing = PublicationEligibility.evaluate(siblingCommit, passingReport);
+
+        assertFalse(failing.eligible());
+        assertTrue(passing.eligible(), passing.reason());
     }
 
     /** Every other test in this file builds a report through the pre-cumulative-migration 14-arg
@@ -145,8 +145,7 @@ class PublicationEligibilityTest {
 
         assertEquals(success(), report.effectiveGroupJenkinsValidation());
         assertTrue(report.jenkinsValidated());
-        EligibilityResult result = PublicationEligibility.evaluate(
-                cohort(RemediationCohort.PublicationStatus.READY_TO_PUBLISH), Map.of(COMMIT_SHA, report));
+        EligibilityResult result = PublicationEligibility.evaluate(commit(), report);
         assertTrue(result.eligible(), result.reason());
     }
 
@@ -157,8 +156,7 @@ class PublicationEligibilityTest {
         RemediationReport report = report(ValidationStatus.PASSED, ValidationStatus.PASSED, success(), success());
 
         assertEquals(success(), report.effectiveGroupJenkinsValidation());
-        EligibilityResult result = PublicationEligibility.evaluate(
-                cohort(RemediationCohort.PublicationStatus.READY_TO_PUBLISH), Map.of(COMMIT_SHA, report));
+        EligibilityResult result = PublicationEligibility.evaluate(commit(), report);
         assertTrue(result.eligible(), result.reason());
     }
 }

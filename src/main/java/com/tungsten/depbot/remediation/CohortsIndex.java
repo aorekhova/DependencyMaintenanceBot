@@ -54,13 +54,29 @@ public record CohortsIndex(String runId, List<Entry> cohorts) {
         }
     }
 
-    /** One group's successful commit, and where its own {@link RemediationReport} was written. */
-    public record Commit(String groupId, String commitSha, String remediationReportPath) {
+    /**
+     * One group's successful commit, and where its own {@link RemediationReport} was written.
+     *
+     * <p>{@code requiresHumanReviewDespiteConformance} is {@code true} when {@code PlanConformanceGate}
+     * accepted this commit only via a narrow, failure-driven scope extension (see {@code
+     * PlanConformanceResult#scopeExtensions()}) -- structurally conformant, but never eligible for
+     * ordinary, auto-merge-looking publication regardless of which cohort it landed on; the publication
+     * layer must treat it exactly like a genuine {@code HUMAN_REVIEW_REQUIRED} group's commit.
+     */
+    public record Commit(
+            String groupId, String commitSha, String remediationReportPath,
+            boolean requiresHumanReviewDespiteConformance) {
 
         public Commit {
             Objects.requireNonNull(groupId, "groupId");
             Objects.requireNonNull(commitSha, "commitSha");
             Objects.requireNonNull(remediationReportPath, "remediationReportPath");
+        }
+
+        /** Backward-compatible shape from before {@code requiresHumanReviewDespiteConformance} existed --
+         *  defaults it to {@code false}. Kept so every existing caller keeps compiling unchanged. */
+        public Commit(String groupId, String commitSha, String remediationReportPath) {
+            this(groupId, commitSha, remediationReportPath, false);
         }
     }
 }

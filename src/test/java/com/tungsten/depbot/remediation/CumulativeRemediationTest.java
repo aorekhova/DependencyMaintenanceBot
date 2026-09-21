@@ -412,10 +412,14 @@ class CumulativeRemediationTest {
         FakeClaude spy = fake;
         service(spy, jenkins, unreliableGit).remediateAll(RUN_ID, List.of(a, b, c));
 
-        assertEquals(5, spy.invocationCount(),
-                "assessment, impl(A), impl(B) attempt 1, human-review(B's rejection), "
-                        + "human-review(unsafe state) -- B's repair attempt and group C's implementation must "
-                        + "never run");
+        // ONE REMEDIATION GROUP = ONE EXTERNAL PUBLICATION UNIT (run 20260919-221201-636b49): the unsafe
+        // repository state's Human Review now runs once per group (once for A, once for B) instead of one
+        // combined call for both -- hence 6, not the pre-fix 5. B's repair attempt and group C's
+        // implementation still must never run.
+        assertEquals(6, spy.invocationCount(),
+                "assessment, impl(A), impl(B) attempt 1, human-review(A's own unsafe-state report), "
+                        + "human-review(B's own unsafe-state report) -- B's repair attempt and group C's "
+                        + "implementation must never run");
 
         List<String> commits = commitsAheadOfS0();
         assertEquals(1, commits.size(), "A's already-accepted commit must remain untouched: " + commits);

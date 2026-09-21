@@ -120,6 +120,30 @@ public record ClaudeRunRequest(
     }
 
     /**
+     * An implementation-phase request whose turn/time budget depends on the group's own {@link
+     * com.tungsten.depbot.assessment.ImplementationBudget}, chosen by the Vulnerability Analysis Engineer
+     * -- {@code STANDARD} uses exactly {@link #of}'s ordinary configured budget (no behavior change from
+     * before this existed); {@code EXTENDED} uses {@link ClaudeConfig#implementationExtendedMaxTurns()}/
+     * {@link ClaudeConfig#implementationExtendedTimeout()} instead, for every attempt of that group
+     * (including the first), never only a later one.
+     */
+    public static ClaudeRunRequest ofImplementation(
+            Path workspace, String prompt, Path attemptDirectory, ClaudeConfig config,
+            com.tungsten.depbot.assessment.ImplementationBudget budget) {
+        Objects.requireNonNull(config, "config");
+        Objects.requireNonNull(budget, "budget");
+        boolean extended = budget == com.tungsten.depbot.assessment.ImplementationBudget.EXTENDED;
+        return new ClaudeRunRequest(
+                ClaudePhase.IMPLEMENTATION,
+                workspace,
+                prompt,
+                attemptDirectory,
+                ClaudeToolPolicy.forPhase(ClaudePhase.IMPLEMENTATION),
+                extended ? config.implementationExtendedMaxTurns() : config.implementationMaxTurns(),
+                extended ? config.implementationExtendedTimeout() : config.implementationTimeout());
+    }
+
+    /**
      * The short, read-only finalization request that follows an implementation which ran out of turns
      * or time: {@link ClaudeToolPolicy#forImplementationFinalization()}, its own small turn budget, and
      * -- when {@code resumeSessionId} is known -- a resume of that same session rather than a fresh one.

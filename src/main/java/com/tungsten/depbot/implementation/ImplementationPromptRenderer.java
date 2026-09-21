@@ -5,6 +5,7 @@ import com.tungsten.depbot.assessment.AnalysisRemediationGroup;
 import com.tungsten.depbot.assessment.FindingAssessment;
 import com.tungsten.depbot.assessment.FindingContextRenderer;
 import com.tungsten.depbot.assessment.PartialAnalysisState;
+import com.tungsten.depbot.assessment.PlannedChangeType;
 import com.tungsten.depbot.assessment.PlannedDependencyChange;
 import com.tungsten.depbot.claude.ClaudePhase;
 import com.tungsten.depbot.report.SecretRedactor;
@@ -323,12 +324,16 @@ public final class ImplementationPromptRenderer {
             lines.add("- " + FindingContextRenderer.NOT_PROVIDED);
         } else {
             for (PlannedDependencyChange change : plannedChanges) {
+                String excluding = change.changeType() == PlannedChangeType.EXCLUSION_ADDED
+                        ? " -- excluding " + String.join(", ", change.excludedCoordinates())
+                                + " from " + text(change.dependencyCoordinates())
+                        : "";
                 lines.add("- " + text(change.dependencyCoordinates()) + ": "
                         + text(change.currentVersion()) + " -> " + text(change.targetVersion())
                         + " in `" + text(change.affectedFile()) + "` ("
                         + (change.changeType() == null ? FindingContextRenderer.NOT_PROVIDED
                                 : change.changeType().name())
-                        + "): " + text(change.reason()));
+                        + ")" + excluding + ": " + text(change.reason()));
             }
         }
         lines.add("");
@@ -350,6 +355,16 @@ public final class ImplementationPromptRenderer {
         lines.add("");
         lines.add("- Where the previous attempt stopped: " + repair.failedStage());
         lines.add("- What went wrong: " + text(repair.exactErrorEvidenceSummary()));
+        lines.add("");
+        lines.add("**If, and only if, this specific failure evidence directly points at a file outside the "
+                + "plan above** (for example, a dependency-resolution failure naming a companion module that "
+                + "still pulls in the vulnerable coordinate through a path the plan did not cover), you may "
+                + "touch that one additional file -- never as a way to redo the plan, only to close the exact "
+                + "gap this evidence just proved exists. If you do, you must name the file and explain why in "
+                + "`divergenceFromAssessment`, saying plainly that the original plan did not include it and "
+                + "exactly what evidence made it necessary. A structural, Java-owned check independently "
+                + "verifies any such extra file against this same evidence -- an edit it cannot verify this "
+                + "way is rejected exactly like any other unauthorized file.");
         lines.add("");
         if (repair.implementationDiff() != null && !repair.implementationDiff().isBlank()) {
             lines.add("Your previous attempt's diff, for reference (already undone -- the branch is clean "
@@ -382,6 +397,13 @@ public final class ImplementationPromptRenderer {
         if (!repair.conformanceViolations().isEmpty()) {
             appendList(lines, "Plan-conformance violations a Java-owned structural check found",
                     repair.conformanceViolations());
+        }
+        if (!repair.priorAttemptsEvidence().isEmpty()) {
+            lines.add("");
+            appendList(lines, "What earlier attempts at this same remediation already established, before "
+                    + "the one described above -- do not lose sight of this just because the most recent "
+                    + "attempt was rejected for a different, unrelated reason",
+                    repair.priorAttemptsEvidence());
         }
     }
 

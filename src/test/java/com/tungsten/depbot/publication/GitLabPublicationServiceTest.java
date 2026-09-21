@@ -49,10 +49,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The publication layer against a real git repository and an in-memory GitLab -- proving the branch is
- * genuinely pushed, one Merge Request covers the whole cohort, every commit's own report reaches GitLab
- * against its exact SHA, one Issue covers a whole Human Review group (never one per library inside it), a
- * retried publish neither duplicates anything nor loses what already succeeded, and a Merge Request a
- * human has already closed or merged is never reopened, recreated, or pushed to again.
+ * genuinely pushed, one Merge Request covers exactly one remediation GROUP (never combined with a
+ * sibling's, even when several groups shared a cohort during remediation), every commit's own report
+ * reaches GitLab against its exact SHA, one Issue covers a whole Human Review group (never one per library
+ * inside it), a retried publish neither duplicates anything nor loses what already succeeded, and a Merge
+ * Request a human has already closed or merged is never reopened, recreated, or pushed to again.
  *
  * <p>{@link RemoteIdentityVerifier} is replaced with an always-succeeding stub in every test here except
  * the ones specifically about identity mismatch -- the real check is covered by {@link
@@ -86,12 +87,17 @@ class GitLabPublicationServiceTest {
     }
 
     private GitLabPublicationService serviceWithGit(GitCommandRunner gitCommandRunner) {
+        return serviceWithGit(gitCommandRunner, StandalonePublicationValidator.unavailable());
+    }
+
+    private GitLabPublicationService serviceWithGit(
+            GitCommandRunner gitCommandRunner, StandalonePublicationValidator standalonePublicationValidator) {
         GitLabConfig config = new GitLabConfig(
                 "https://gitlab.example.invalid", "123", "token-not-logged", "origin");
         return new GitLabPublicationService(repo, gitCommandRunner, config, gitLabClient, runService,
                 new RemediationReportMarkdownRenderer(), new HumanReviewReportMarkdownRenderer(),
-                new PublicationSummaryMarkdownRenderer(), new PublicationIndexJsonRenderer(),
-                new AlwaysVerifiedIdentityVerifier());
+                new PublicationIndexJsonRenderer(), new AlwaysVerifiedIdentityVerifier(),
+                standalonePublicationValidator);
     }
 
     /** Never touches git or GitLab -- every other test here needs identity verification out of the way. */
@@ -260,9 +266,8 @@ class GitLabPublicationServiceTest {
         assertTrue(cohortPublication.publishedCommits().get(0).reportPublished());
 
         String description = gitLabClient.mergeRequestDescription(1);
-        assertTrue(description.contains("1 remediation group"), description);
-        assertTrue(description.contains("2 libraries updated"), description);
-        assertTrue(description.contains("1 commit created"), description);
+        assertTrue(description.contains("g-mchange"), description);
+        assertTrue(description.contains("0.14.0"), description);
 
         assertTrue(Files.exists(runService.runDirectoryFor(RUN_ID).resolve(GitLabPublicationService.PUBLICATION_FILE)));
     }
@@ -755,8 +760,8 @@ class GitLabPublicationServiceTest {
         GitLabConfig config = new GitLabConfig("https://gitlab.example.invalid", "123", "token-not-logged", "origin");
         GitLabPublicationService serviceUnderTest = new GitLabPublicationService(repo, countingGit, config,
                 gitLabClient, runService, new RemediationReportMarkdownRenderer(),
-                new HumanReviewReportMarkdownRenderer(), new PublicationSummaryMarkdownRenderer(),
-                new PublicationIndexJsonRenderer(), alwaysMismatched);
+                new HumanReviewReportMarkdownRenderer(),
+                new PublicationIndexJsonRenderer(), alwaysMismatched, StandalonePublicationValidator.unavailable());
 
         CohortsIndex cohortsIndex = new CohortsIndex(RUN_ID, List.of(new CohortsIndex.Entry(
                 branchName, VERIFIED_REF, VERIFIED_SHA, RemediationCohort.PublicationStatus.READY_TO_PUBLISH,
@@ -771,5 +776,249 @@ class GitLabPublicationServiceTest {
         assertEquals(RemediationCohort.PublicationStatus.PUBLICATION_FAILED, index.cohorts().get(0).status());
         assertEquals(IssuePublicationStatus.PUBLICATION_FAILED, index.humanReviewGroups().get(0).status());
         assertTrue(index.cohorts().get(0).errorMessage().contains("does not match"), index.cohorts().get(0).errorMessage());
+    }
+
+    // ---- one remediation group = one external publication unit (run 20260919-221201-636b49) -----------
+
+    /** Commits {@code fileB} on top of {@code parentSha} on the already-checked-out {@code branchName} --
+     *  a second group stacked onto the first, exactly as remediation itself would leave it. */
+    private String commitOnTopOf(String branchName, String fileName, String content) throws Exception {
+        git.checkout(repo, branchName);
+        Files.writeString(repo.resolve(fileName), content, StandardCharsets.UTF_8);
+        GitTestRepos.run(repo, "git", "add", "-A");
+        GitTestRepos.run(repo, "git", "commit", "-q", "-m", "remediate: " + fileName);
+        String sha = git.currentHeadSha(repo);
+        git.checkout(repo, "master");
+        return sha;
+    }
+
+    private static RemediationReport bcprovReport(String commitSha) {
+        return new RemediationReport("1.0", commitSha, "g-bcprov",
+                List.of("org.bouncycastle:bcprov-jdk18on"), "changed", "necessary", "why", List.of("pom.xml"),
+                "validated", List.of(), ValidationStatus.PASSED, ValidationStatus.PASSED,
+                jenkinsSuccess(commitSha), jenkinsSuccess(commitSha));
+    }
+
+    @Test
+    @DisplayName("two groups sharing one cohort/branch produce two separate Merge Requests, never one "
+            + "combined MR")
+    void twoGroupsSharingOneCohortProduceTwoSeparateMergeRequests() throws Exception {
+        String s0 = git.currentHeadSha(repo);
+        String branchName = "remediation/run1/hotfix-2026.1-3473b0daa6be";
+        String commitA = commitOnNewBranch(branchName, "a.txt", "a\n");
+        String commitB = commitOnTopOf(branchName, "b.txt", "b\n");
+        Path reportAPath = writeRemediationReport("high__group__g-mchange", mchangeReport(commitA));
+        Path reportBPath = writeRemediationReport("critical__group__g-bcprov", bcprovReport(commitB));
+
+        // The second (non-first) commit needs standalone re-validation before it may publish -- a
+        // stand-in that always succeeds, since this test is about publication granularity, not about the
+        // re-validation gate itself (see standalonePublicationBlockedUntilRevalidationCompletes for that).
+        StandalonePublicationValidator alwaysSucceeds =
+                (runId, unitId, repoPath, verifiedSourceSha, isolatedTip) -> java.util.Optional.empty();
+        GitLabPublicationService serviceUnderTest = serviceWithGit(git, alwaysSucceeds);
+
+        CohortsIndex cohortsIndex = new CohortsIndex(RUN_ID, List.of(new CohortsIndex.Entry(
+                branchName, VERIFIED_REF, s0, RemediationCohort.PublicationStatus.READY_TO_PUBLISH,
+                List.of(new CohortsIndex.Commit("g-mchange", commitA, reportAPath.toString()),
+                        new CohortsIndex.Commit("g-bcprov", commitB, reportBPath.toString())))));
+
+        PublicationIndex index = serviceUnderTest.publish(RUN_ID, cohortsIndex, emptySummary());
+
+        assertEquals(2, gitLabClient.mergeRequestCount(), "one MR per group, never one combined MR");
+        assertEquals(2, index.cohorts().size());
+        assertTrue(index.cohorts().stream()
+                .allMatch(c -> c.status() == RemediationCohort.PublicationStatus.MERGE_REQUEST_OPENED),
+                index.cohorts().toString());
+
+        // Each group publishes under its own, distinct isolated branch name -- never the shared cohort
+        // branch itself, and never each other's.
+        List<String> publishedBranches = index.cohorts().stream()
+                .map(PublicationIndex.CohortPublication::branchName).distinct().toList();
+        assertEquals(2, publishedBranches.size(), publishedBranches.toString());
+        assertTrue(publishedBranches.stream().allMatch(name -> name.startsWith("remediation/")),
+                publishedBranches.toString());
+    }
+
+    @Test
+    @DisplayName("each group's Merge Request description contains only that group's own report -- never a "
+            + "sibling's, and never a whole-run aggregate")
+    void mrDescriptionContainsOnlyThatGroupsOwnReportContent() throws Exception {
+        String s0 = git.currentHeadSha(repo);
+        String branchName = "remediation/run1/hotfix-2026.1-3473b0daa6be";
+        String commitA = commitOnNewBranch(branchName, "a.txt", "a\n");
+        String commitB = commitOnTopOf(branchName, "b.txt", "b\n");
+        Path reportAPath = writeRemediationReport("high__group__g-mchange", mchangeReport(commitA));
+        Path reportBPath = writeRemediationReport("critical__group__g-bcprov", bcprovReport(commitB));
+
+        StandalonePublicationValidator alwaysSucceeds =
+                (runId, unitId, repoPath, verifiedSourceSha, isolatedTip) -> java.util.Optional.empty();
+        GitLabPublicationService serviceUnderTest = serviceWithGit(git, alwaysSucceeds);
+
+        CohortsIndex cohortsIndex = new CohortsIndex(RUN_ID, List.of(new CohortsIndex.Entry(
+                branchName, VERIFIED_REF, s0, RemediationCohort.PublicationStatus.READY_TO_PUBLISH,
+                List.of(new CohortsIndex.Commit("g-mchange", commitA, reportAPath.toString()),
+                        new CohortsIndex.Commit("g-bcprov", commitB, reportBPath.toString())))));
+
+        serviceUnderTest.publish(RUN_ID, cohortsIndex, emptySummary());
+
+        String descriptionA = gitLabClient.mergeRequestDescription(1);
+        String descriptionB = gitLabClient.mergeRequestDescription(2);
+        assertTrue(descriptionA.contains("g-mchange"), descriptionA);
+        assertFalse(descriptionA.contains("g-bcprov"), descriptionA);
+        assertTrue(descriptionB.contains("g-bcprov"), descriptionB);
+        assertFalse(descriptionB.contains("g-mchange"), descriptionB);
+        // Neither carries "N groups"/whole-run aggregate language of any kind.
+        assertFalse(descriptionA.contains("groups)"), descriptionA);
+        assertFalse(descriptionB.contains("groups)"), descriptionB);
+    }
+
+    @Test
+    @DisplayName("a single group with multiple member libraries (HttpComponents-shaped) still produces "
+            + "exactly one Merge Request -- one GROUP is the publication unit, never one per library")
+    void multiLibrarySingleGroupStaysOneMergeRequest() throws Exception {
+        String branchName = "remediation/run1/hotfix-2026.1-3473b0daa6be";
+        String commitSha = commitOnNewBranch(branchName, "pom.xml", "<project/>\n");
+        Path reportPath = writeRemediationReport("high__group__g-mchange", mchangeReport(commitSha));
+
+        CohortsIndex cohortsIndex = new CohortsIndex(RUN_ID, List.of(new CohortsIndex.Entry(
+                branchName, VERIFIED_REF, VERIFIED_SHA, RemediationCohort.PublicationStatus.READY_TO_PUBLISH,
+                List.of(new CohortsIndex.Commit("g-mchange", commitSha, reportPath.toString())))));
+
+        service.publish(RUN_ID, cohortsIndex, emptySummary());
+
+        assertEquals(1, gitLabClient.mergeRequestCount(),
+                "mchangeReport's group already covers two libraries (c3p0 + mchange-commons-java) -- still "
+                        + "one MR, since the GROUP is the publication unit, not the library");
+    }
+
+    @Test
+    @DisplayName("a cherry-pick conflict fails only that one group -- its sibling in the same cohort still "
+            + "publishes")
+    void cherryPickConflictFailsOnlyThatGroupSiblingStillPublishes() throws Exception {
+        String s0 = git.currentHeadSha(repo);
+        String branchName = "remediation/run1/hotfix-2026.1-3473b0daa6be";
+        // Both commits touch the SAME file/line, on top of one another -- cherry-picking B alone onto s0
+        // (which never saw A's own edit) conflicts.
+        String commitA = commitOnNewBranch(branchName, "shared.txt", "line-from-a\n");
+        String commitB = commitOnTopOf(branchName, "shared.txt", "line-from-a-then-b\n");
+        Path reportAPath = writeRemediationReport("high__group__g-mchange", mchangeReport(commitA));
+        Path reportBPath = writeRemediationReport("critical__group__g-bcprov", bcprovReport(commitB));
+
+        CohortsIndex cohortsIndex = new CohortsIndex(RUN_ID, List.of(new CohortsIndex.Entry(
+                branchName, VERIFIED_REF, s0, RemediationCohort.PublicationStatus.READY_TO_PUBLISH,
+                List.of(new CohortsIndex.Commit("g-mchange", commitA, reportAPath.toString()),
+                        new CohortsIndex.Commit("g-bcprov", commitB, reportBPath.toString())))));
+
+        PublicationIndex index = service.publish(RUN_ID, cohortsIndex, emptySummary());
+
+        PublicationIndex.CohortPublication publicationA = index.cohorts().stream()
+                .filter(c -> c.publishedCommits().stream().anyMatch(pc -> pc.groupId().equals("g-mchange")))
+                .findFirst().orElseThrow();
+        PublicationIndex.CohortPublication publicationB = index.cohorts().stream()
+                .filter(c -> c.branchName().endsWith("g-bcprov") || c.errorMessage() != null
+                        && c.errorMessage().contains("cherry-pick"))
+                .findFirst().orElseThrow();
+
+        assertEquals(RemediationCohort.PublicationStatus.MERGE_REQUEST_OPENED, publicationA.status(),
+                "group A (the cohort's first commit) needed no cherry-pick and must still publish");
+        assertEquals(RemediationCohort.PublicationStatus.PUBLICATION_FAILED, publicationB.status());
+        assertTrue(publicationB.errorMessage().contains("cherry-pick"), publicationB.errorMessage());
+        assertEquals(1, gitLabClient.mergeRequestCount(), "only group A's MR was actually created");
+    }
+
+    @Test
+    @DisplayName("a non-first commit is not published until standalone re-validation completes -- a fake "
+            + "validator that always fails proves the gate is genuinely consulted, never bypassed")
+    void standalonePublicationBlockedUntilRevalidationCompletes() throws Exception {
+        String s0 = git.currentHeadSha(repo);
+        String branchName = "remediation/run1/hotfix-2026.1-3473b0daa6be";
+        String commitA = commitOnNewBranch(branchName, "a.txt", "a\n");
+        String commitB = commitOnTopOf(branchName, "b.txt", "b\n");
+        Path reportAPath = writeRemediationReport("high__group__g-mchange", mchangeReport(commitA));
+        Path reportBPath = writeRemediationReport("critical__group__g-bcprov", bcprovReport(commitB));
+
+        StandalonePublicationValidator alwaysFails = (runId, unitId, repoPath, verifiedSourceSha, isolatedTip) ->
+                java.util.Optional.of("simulated: the isolated tree did not pass the full build");
+        GitLabPublicationService serviceUnderTest = serviceWithGit(git, alwaysFails);
+
+        CohortsIndex cohortsIndex = new CohortsIndex(RUN_ID, List.of(new CohortsIndex.Entry(
+                branchName, VERIFIED_REF, s0, RemediationCohort.PublicationStatus.READY_TO_PUBLISH,
+                List.of(new CohortsIndex.Commit("g-mchange", commitA, reportAPath.toString()),
+                        new CohortsIndex.Commit("g-bcprov", commitB, reportBPath.toString())))));
+
+        PublicationIndex index = serviceUnderTest.publish(RUN_ID, cohortsIndex, emptySummary());
+
+        PublicationIndex.CohortPublication publicationB = index.cohorts().stream()
+                .filter(c -> c.errorMessage() != null && c.errorMessage().contains("simulated"))
+                .findFirst().orElseThrow();
+        assertEquals(RemediationCohort.PublicationStatus.PUBLICATION_FAILED, publicationB.status());
+        assertTrue(publicationB.errorMessage().contains("re-validated"), publicationB.errorMessage());
+        assertEquals(1, gitLabClient.mergeRequestCount(), "only group A (needing no re-validation) published");
+    }
+
+    @Test
+    @DisplayName("a non-first commit that genuinely re-validates successfully is published standalone, "
+            + "under its own isolated branch")
+    void nonFirstCommitPublishesStandaloneWhenRevalidationSucceeds() throws Exception {
+        String s0 = git.currentHeadSha(repo);
+        String branchName = "remediation/run1/hotfix-2026.1-3473b0daa6be";
+        String commitA = commitOnNewBranch(branchName, "a.txt", "a\n");
+        String commitB = commitOnTopOf(branchName, "b.txt", "b\n");
+        Path reportAPath = writeRemediationReport("high__group__g-mchange", mchangeReport(commitA));
+        Path reportBPath = writeRemediationReport("critical__group__g-bcprov", bcprovReport(commitB));
+
+        StandalonePublicationValidator alwaysSucceeds =
+                (runId, unitId, repoPath, verifiedSourceSha, isolatedTip) -> java.util.Optional.empty();
+        GitLabPublicationService serviceUnderTest = serviceWithGit(git, alwaysSucceeds);
+
+        CohortsIndex cohortsIndex = new CohortsIndex(RUN_ID, List.of(new CohortsIndex.Entry(
+                branchName, VERIFIED_REF, s0, RemediationCohort.PublicationStatus.READY_TO_PUBLISH,
+                List.of(new CohortsIndex.Commit("g-mchange", commitA, reportAPath.toString()),
+                        new CohortsIndex.Commit("g-bcprov", commitB, reportBPath.toString())))));
+
+        PublicationIndex index = serviceUnderTest.publish(RUN_ID, cohortsIndex, emptySummary());
+
+        assertEquals(2, gitLabClient.mergeRequestCount());
+        assertTrue(index.cohorts().stream()
+                .allMatch(c -> c.status() == RemediationCohort.PublicationStatus.MERGE_REQUEST_OPENED),
+                index.cohorts().toString());
+    }
+
+    @Test
+    @DisplayName("--no-publish-equivalent: zero GitLab calls happen when identity fails, for every group in "
+            + "a multi-group cohort, not just the first")
+    void identityFailureBlocksEveryGroupInAMultiGroupCohort() throws Exception {
+        String s0 = git.currentHeadSha(repo);
+        String branchName = "remediation/run1/hotfix-2026.1-3473b0daa6be";
+        String commitA = commitOnNewBranch(branchName, "a.txt", "a\n");
+        String commitB = commitOnTopOf(branchName, "b.txt", "b\n");
+        Path reportAPath = writeRemediationReport("high__group__g-mchange", mchangeReport(commitA));
+        Path reportBPath = writeRemediationReport("critical__group__g-bcprov", bcprovReport(commitB));
+
+        RemoteIdentityVerifier alwaysMismatched = new RemoteIdentityVerifier() {
+            @Override
+            public VerificationResult verify(
+                    GitCommandRunner git, Path repoPath, String remoteName, GitLabClient client, GitLabConfig config) {
+                return VerificationResult.mismatch("git remote does not match the configured GitLab project");
+            }
+        };
+        GitLabConfig config = new GitLabConfig("https://gitlab.example.invalid", "123", "token-not-logged", "origin");
+        GitLabPublicationService serviceUnderTest = new GitLabPublicationService(repo, git, config,
+                gitLabClient, runService, new RemediationReportMarkdownRenderer(),
+                new HumanReviewReportMarkdownRenderer(),
+                new PublicationIndexJsonRenderer(), alwaysMismatched, StandalonePublicationValidator.unavailable());
+
+        CohortsIndex cohortsIndex = new CohortsIndex(RUN_ID, List.of(new CohortsIndex.Entry(
+                branchName, VERIFIED_REF, s0, RemediationCohort.PublicationStatus.READY_TO_PUBLISH,
+                List.of(new CohortsIndex.Commit("g-mchange", commitA, reportAPath.toString()),
+                        new CohortsIndex.Commit("g-bcprov", commitB, reportBPath.toString())))));
+
+        PublicationIndex index = serviceUnderTest.publish(RUN_ID, cohortsIndex, emptySummary());
+
+        assertEquals(0, gitLabClient.mergeRequestCount());
+        assertEquals(2, index.cohorts().size());
+        assertTrue(index.cohorts().stream()
+                .allMatch(c -> c.status() == RemediationCohort.PublicationStatus.PUBLICATION_FAILED),
+                index.cohorts().toString());
     }
 }

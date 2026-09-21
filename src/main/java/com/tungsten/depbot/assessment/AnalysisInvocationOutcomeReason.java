@@ -28,5 +28,8 @@ public enum AnalysisInvocationOutcomeReason {
     MALFORMED_ANALYSIS,
 
     /** The document parsed, but did not satisfy what {@link BatchAnalysisParser} requires of it. */
-    ANALYSIS_VALIDATION_FAILED
+    ANALYSIS_VALIDATION_FAILED,
+
+    /** The document parsed, but one group's own {@code plannedChanges} contradicts itself. */
+    CONTRADICTORY_PLANNED_CHANGES
 }

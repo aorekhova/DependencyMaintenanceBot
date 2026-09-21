@@ -194,6 +194,30 @@ class ClaudeRunRequestTest {
         assertEquals("sess-hr-1234", request.resumeSessionId());
     }
 
+    // ---- the budget-aware implementation request (run 20260919-221201-636b49) --------------------
+
+    @Test
+    @DisplayName("a STANDARD implementation request uses exactly the ordinary configured budget")
+    void standardImplementationRequestUsesOrdinaryBudget() {
+        ClaudeRunRequest request = ClaudeRunRequest.ofImplementation(
+                WORKSPACE, "do the thing", ATTEMPT, CONFIG, com.tungsten.depbot.assessment.ImplementationBudget.STANDARD);
+
+        assertEquals(ClaudeToolPolicy.forPhase(ClaudePhase.IMPLEMENTATION), request.toolPolicy());
+        assertEquals(CONFIG.implementationMaxTurns(), request.maxTurns());
+        assertEquals(CONFIG.implementationTimeout(), request.timeout());
+    }
+
+    @Test
+    @DisplayName("an EXTENDED implementation request uses the EXTENDED turn budget and timeout instead")
+    void extendedImplementationRequestUsesExtendedBudget() {
+        ClaudeRunRequest request = ClaudeRunRequest.ofImplementation(
+                WORKSPACE, "do the thing", ATTEMPT, CONFIG, com.tungsten.depbot.assessment.ImplementationBudget.EXTENDED);
+
+        assertEquals(CONFIG.implementationExtendedMaxTurns(), request.maxTurns());
+        assertEquals(CONFIG.implementationExtendedTimeout(), request.timeout());
+        assertEquals(120, request.maxTurns());
+    }
+
     @Test
     @DisplayName("each phase has its own artifact directory name and prompt marker")
     void phasesAreDistinguishable() {

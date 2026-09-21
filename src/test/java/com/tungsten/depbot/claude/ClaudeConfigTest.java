@@ -332,4 +332,51 @@ class ClaudeConfigTest {
         assertEquals(ClaudeConfig.DEFAULT_HUMAN_REVIEW_FINALIZATION_MAX_TURNS,
                 config.humanReviewFinalizationMaxTurns());
     }
+
+    // ---- EXTENDED implementationBudget's own turn/time budget (run 20260919-221201-636b49) -----------
+
+    @Test
+    @DisplayName("EXTENDED's own turn budget and timeout default to 120 turns / 30 minutes -- twice "
+            + "STANDARD's own defaults, and unaffected by STANDARD's own overrides")
+    void extendedDefaultsAreTwiceStandardAndIndependent() {
+        ClaudeConfig config = ClaudeConfig.fromEnvironment(
+                Map.of(ClaudeConfig.CLAUDE_IMPLEMENTATION_MAX_TURNS, "75",
+                        ClaudeConfig.CLAUDE_IMPLEMENTATION_TIMEOUT_SECONDS, "600"));
+
+        assertEquals(120, ClaudeConfig.DEFAULT_IMPLEMENTATION_EXTENDED_MAX_TURNS);
+        assertEquals(1800, ClaudeConfig.DEFAULT_IMPLEMENTATION_EXTENDED_TIMEOUT_SECONDS);
+        assertEquals(120, config.implementationExtendedMaxTurns());
+        assertEquals(Duration.ofSeconds(1800), config.implementationExtendedTimeout());
+        assertEquals(75, config.implementationMaxTurns(),
+                "STANDARD's own override must not affect EXTENDED's own budget");
+    }
+
+    @Test
+    @DisplayName("EXTENDED's turn budget and timeout are configurable independently of every other budget")
+    void extendedBudgetIsConfigurableOnItsOwn() {
+        ClaudeConfig config = ClaudeConfig.fromEnvironment(Map.of(
+                ClaudeConfig.CLAUDE_IMPLEMENTATION_EXTENDED_MAX_TURNS, "150",
+                ClaudeConfig.CLAUDE_IMPLEMENTATION_EXTENDED_TIMEOUT_SECONDS, "3600"));
+
+        assertEquals(150, config.implementationExtendedMaxTurns());
+        assertEquals(Duration.ofSeconds(3600), config.implementationExtendedTimeout());
+        assertEquals(ClaudeConfig.DEFAULT_IMPLEMENTATION_MAX_TURNS, config.implementationMaxTurns(),
+                "an override to EXTENDED's budget must not affect STANDARD's own");
+    }
+
+    @Test
+    @DisplayName("a non-numeric or non-positive EXTENDED max turns/timeout is rejected the same way as "
+            + "every other budget")
+    void extendedBudgetValidatesLikeEveryOtherBudget() {
+        ConfigurationException nonNumeric = assertThrows(ConfigurationException.class, () ->
+                ClaudeConfig.fromEnvironment(
+                        Map.of(ClaudeConfig.CLAUDE_IMPLEMENTATION_EXTENDED_MAX_TURNS, "many")));
+        assertEquals(true,
+                nonNumeric.getMessage().contains(ClaudeConfig.CLAUDE_IMPLEMENTATION_EXTENDED_MAX_TURNS));
+
+        assertThrows(ConfigurationException.class, () -> ClaudeConfig.fromEnvironment(
+                Map.of(ClaudeConfig.CLAUDE_IMPLEMENTATION_EXTENDED_MAX_TURNS, "0")));
+        assertThrows(ConfigurationException.class, () -> ClaudeConfig.fromEnvironment(
+                Map.of(ClaudeConfig.CLAUDE_IMPLEMENTATION_EXTENDED_TIMEOUT_SECONDS, "0")));
+    }
 }

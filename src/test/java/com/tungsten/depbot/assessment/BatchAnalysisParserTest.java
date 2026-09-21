@@ -2,7 +2,13 @@ package com.tungsten.depbot.assessment;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -145,6 +151,81 @@ class BatchAnalysisParserTest {
         assertThrows(AssessmentParseException.class, () -> parser.parse(document));
     }
 
+    // ---- EXCLUSION_ADDED must structurally distinguish host from excluded coordinate(s) -- production
+    // defect from run 20260920-052841-210614: Claude #1 set dependencyCoordinates to the HOST
+    // (org.kordamp.json:json-lib-core) and named the excluded coordinates (junit:junit,
+    // org.slf4j:jcl-over-slf4j) only in reason's free-form prose. PlanConformanceGate at the time treated
+    // dependencyCoordinates itself as the excluded coordinate for every EXCLUSION_ADDED entry, so it went
+    // looking for an exclusion of json-lib-core that could never exist. These tests exercise the fixed,
+    // fully structural contract at the parser boundary: excludedCoordinates is required, and non-empty,
+    // for every EXCLUSION_ADDED entry.
+
+    private static final String VALID_EXCLUSION_PLANNED_CHANGE = """
+            {
+              "dependencyCoordinates": "org.kordamp.json:json-lib-core",
+              "currentVersion": null,
+              "targetVersion": null,
+              "affectedFile": "pom.xml",
+              "changeType": "EXCLUSION_ADDED",
+              "excludedCoordinates": ["junit:junit", "org.slf4j:jcl-over-slf4j"],
+              "reason": "excludes junit and jcl-over-slf4j from json-lib-core"
+            }""";
+
+    @Test
+    @DisplayName("an EXCLUSION_ADDED entry with dependencyCoordinates as the host and an explicit, "
+            + "non-empty excludedCoordinates parses normally")
+    void exclusionAddedWithHostAndExcludedCoordinatesParsesNormally() {
+        BatchAnalysis analysis = parser.parse(documentWithPlannedChange(VALID_EXCLUSION_PLANNED_CHANGE));
+
+        var change = analysis.remediationGroups().get(0).plannedChanges().get(0);
+        assertEquals("org.kordamp.json:json-lib-core", change.dependencyCoordinates());
+        assertEquals(java.util.List.of("junit:junit", "org.slf4j:jcl-over-slf4j"), change.excludedCoordinates());
+    }
+
+    @Test
+    @DisplayName("run 20260920-052841-210614's exact shape: an EXCLUSION_ADDED entry naming the excluded "
+            + "coordinate(s) only in reason's prose, with no excludedCoordinates field at all, fails closed "
+            + "-- it must never be silently accepted as if dependencyCoordinates were the excluded coordinate")
+    void exclusionAddedWithNoExcludedCoordinatesFieldFailsClosed() {
+        String malformed = VALID_EXCLUSION_PLANNED_CHANGE.replace(
+                "\"excludedCoordinates\": [\"junit:junit\", \"org.slf4j:jcl-over-slf4j\"],\n", "");
+
+        AssessmentParseException exception = assertThrows(AssessmentParseException.class,
+                () -> parser.parse(documentWithPlannedChange(malformed)));
+
+        assertEquals(AssessmentParseException.Kind.MALFORMED_ANALYSIS, exception.kind());
+        assertTrue(exception.getMessage().contains("excludedCoordinates"), exception.getMessage());
+    }
+
+    @Test
+    @DisplayName("an EXCLUSION_ADDED entry with an empty excludedCoordinates list fails closed")
+    void exclusionAddedWithEmptyExcludedCoordinatesFailsClosed() {
+        String malformed = VALID_EXCLUSION_PLANNED_CHANGE.replace(
+                "[\"junit:junit\", \"org.slf4j:jcl-over-slf4j\"]", "[]");
+
+        AssessmentParseException exception = assertThrows(AssessmentParseException.class,
+                () -> parser.parse(documentWithPlannedChange(malformed)));
+
+        assertEquals(AssessmentParseException.Kind.MALFORMED_ANALYSIS, exception.kind());
+        assertTrue(exception.getMessage().contains("excludedCoordinates"), exception.getMessage());
+    }
+
+    @Test
+    @DisplayName("a VERSION_BUMP entry with excludedCoordinates set fails closed -- the field is only "
+            + "meaningful for EXCLUSION_ADDED")
+    void nonExclusionEntryWithExcludedCoordinatesFailsClosed() {
+        String malformed = VALID_PLANNED_CHANGE.replace(
+                "\"reason\": \"pin the new dependencyManagement entry to 5.3\"",
+                "\"reason\": \"pin the new dependencyManagement entry to 5.3\",\n"
+                        + "  \"excludedCoordinates\": [\"org.apache.httpcomponents.core5:httpcore5\"]");
+
+        AssessmentParseException exception = assertThrows(AssessmentParseException.class,
+                () -> parser.parse(documentWithPlannedChange(malformed)));
+
+        assertEquals(AssessmentParseException.Kind.MALFORMED_ANALYSIS, exception.kind());
+        assertTrue(exception.getMessage().contains("excludedCoordinates"), exception.getMessage());
+    }
+
     // ---- NO_ACTION_REQUIRED must carry a noActionBasis -- production defect from pilot
     // 20260908-162700-b5dce6: a jsoup finding concluded NO_ACTION_REQUIRED by reading Mend's own
     // "through 1.23.2, fixed in commit 862ba2f" phrasing literally, without resolving it against a more
@@ -229,5 +310,171 @@ class BatchAnalysisParserTest {
 
         assertEquals(AssessmentParseException.Kind.ANALYSIS_VALIDATION_FAILED, exception.kind());
         assertTrue(exception.getMessage().contains("noActionBasis"), exception.getMessage());
+    }
+
+    // ---- contradictory plannedChanges (FreeMarker-style case, run 20260919-221201-636b49) ---------------
+    // A group must not describe the same logical Maven control point two incompatible ways. Generic
+    // `com.example:*` coordinates throughout -- nothing here names a real production library.
+
+    @TempDir
+    Path workspace;
+
+    private static String documentWithTwoPlannedChanges(String changeAJson, String changeBJson) {
+        return """
+                {
+                  "schemaVersion": "1.0",
+                  "findings": [
+                    {
+                      "coordinates": "com.example:library-a",
+                      "vulnerabilityIds": ["CVE-2026-1"],
+                      "summary": "needs remediation",
+                      "conclusion": "REMEDIATION_REQUIRED",
+                      "remediationGroupId": "g-library-a",
+                      "evidence": ["evidence"]
+                    }
+                  ],
+                  "remediationGroups": [
+                    {
+                      "groupId": "g-library-a",
+                      "memberCoordinates": ["com.example:library-a"],
+                      "groupingReason": "a single finding",
+                      "sourceRef": "origin/release/9.2",
+                      "sourceCommitSha": "0123456789abcdef0123456789abcdef01234567",
+                      "origin": "DEPENDENCY_MANAGEMENT",
+                      "dependencyRelationship": "declared directly",
+                      "observedVersion": "1.0",
+                      "recommendedRemediation": "fix the control point and raise the version",
+                      "recommendedTargetVersion": "1.1",
+                      "affectedFiles": ["pom.xml"],
+                      "impactScore": 2,
+                      "impactReason": "one control point",
+                      "automationSafety": "AUTOMATIC_ALLOWED",
+                      "automationSafetyReason": "a routine dependencyManagement fix",
+                      "implementationPlan": ["fix the control point"],
+                      "validationPlan": ["run dependency:tree"],
+                      "plannedChanges": [
+                        %s,
+                        %s
+                      ]
+                    }
+                  ]
+                }
+                """.formatted(changeAJson, changeBJson);
+    }
+
+    private static String plannedChange(String coordinates, String file, String changeType, String targetVersion) {
+        return """
+                {
+                  "dependencyCoordinates": "%s",
+                  "currentVersion": null,
+                  "targetVersion": "%s",
+                  "affectedFile": "%s",
+                  "changeType": "%s",
+                  "reason": "test fixture"
+                }""".formatted(coordinates, targetVersion, file, changeType);
+    }
+
+    private void writePom(String content) throws IOException {
+        Files.writeString(workspace.resolve("pom.xml"), content);
+    }
+
+    @Test
+    @DisplayName("same coordinate, same file, same changeType, different target versions -- contradictory "
+            + "with no repository access needed")
+    void sameTypeDifferentTargetsIsContradictory() {
+        String a = plannedChange("com.example:library-a", "pom.xml", "VERSION_BUMP", "1.1");
+        String b = plannedChange("com.example:library-a", "pom.xml", "VERSION_BUMP", "1.2");
+
+        AssessmentParseException exception = assertThrows(AssessmentParseException.class,
+                () -> parser.parse(documentWithTwoPlannedChanges(a, b)));
+
+        assertEquals(AssessmentParseException.Kind.CONTRADICTORY_PLANNED_CHANGES, exception.kind());
+        assertTrue(exception.getMessage().contains("com.example:library-a"), exception.getMessage());
+    }
+
+    @Test
+    @DisplayName("FreeMarker-shaped case: baseline mechanically has no effective managed entry for the real "
+            + "coordinate (only a wrong-artifactId one), so VERSION_BUMP + DEPENDENCY_MANAGEMENT_ADDITION for "
+            + "the same coordinate/file is a mechanically confirmed contradiction")
+    void freemarkerShapedContradictionIsMechanicallyConfirmed() throws IOException {
+        writePom("""
+                <project>
+                  <dependencyManagement>
+                    <dependencies>
+                      <dependency>
+                        <groupId>com.example</groupId>
+                        <artifactId>wrong-artifact-name</artifactId>
+                        <version>1.0</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """);
+        String versionBump = plannedChange("com.example:library-a", "pom.xml", "VERSION_BUMP", "1.1");
+        String addition = plannedChange("com.example:library-a", "pom.xml", "DEPENDENCY_MANAGEMENT_ADDITION", "1.1");
+
+        AssessmentParseException exception = assertThrows(AssessmentParseException.class,
+                () -> parser.parse(documentWithTwoPlannedChanges(versionBump, addition), workspace));
+
+        assertEquals(AssessmentParseException.Kind.CONTRADICTORY_PLANNED_CHANGES, exception.kind());
+        assertTrue(exception.getMessage().contains("VERSION_BUMP"), exception.getMessage());
+    }
+
+    @Test
+    @DisplayName("regression: the same coordinate legitimately at two different real control points in the "
+            + "same file (a direct dependency's own version, plus a genuinely new, separate managed entry) "
+            + "is never a false-positive contradiction")
+    void legitimateDualControlPointIsNotFlagged() throws IOException {
+        writePom("""
+                <project>
+                  <dependencies>
+                    <dependency>
+                      <groupId>com.example</groupId>
+                      <artifactId>library-a</artifactId>
+                      <version>1.0</version>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """);
+        String versionBump = plannedChange("com.example:library-a", "pom.xml", "VERSION_BUMP", "1.1");
+        String addition = plannedChange("com.example:library-a", "pom.xml", "DEPENDENCY_MANAGEMENT_ADDITION", "1.1");
+
+        assertDoesNotThrow(() -> parser.parse(documentWithTwoPlannedChanges(versionBump, addition), workspace));
+    }
+
+    @Test
+    @DisplayName("regression: the same coordinate across two different affectedFile values (e.g. root pom "
+            + "and a module pom) is never flagged -- these are genuinely separate edits")
+    void sameCoordinateDifferentFilesIsNotFlagged() {
+        String rootEdit = plannedChange("com.example:library-a", "pom.xml", "VERSION_BUMP", "1.1");
+        String moduleEdit = plannedChange("com.example:library-a", "module/pom.xml", "VERSION_BUMP", "1.1");
+
+        assertDoesNotThrow(() -> parser.parse(documentWithTwoPlannedChanges(rootEdit, moduleEdit)));
+    }
+
+    // ---- implementationBudget (run 20260919-221201-636b49) -------------------------------------------
+
+    @Test
+    @DisplayName("an explicit implementationBudget of EXTENDED parses through and reads back as EXTENDED")
+    void explicitExtendedImplementationBudgetParses() {
+        String document = documentWithPlannedChange(VALID_PLANNED_CHANGE)
+                .replace("\"validationPlan\": [\"run dependency:tree\"],",
+                        "\"validationPlan\": [\"run dependency:tree\"],\n"
+                                + "                      \"implementationBudget\": \"EXTENDED\",");
+
+        BatchAnalysis analysis = parser.parse(document);
+
+        assertEquals(ImplementationBudget.EXTENDED,
+                analysis.remediationGroups().get(0).effectiveImplementationBudget());
+    }
+
+    @Test
+    @DisplayName("a group with no implementationBudget at all defaults to STANDARD -- an absent budget must "
+            + "never grant more attempts/turns than the safe default")
+    void missingImplementationBudgetDefaultsToStandard() {
+        BatchAnalysis analysis = parser.parse(documentWithPlannedChange(VALID_PLANNED_CHANGE));
+
+        assertEquals(ImplementationBudget.STANDARD,
+                analysis.remediationGroups().get(0).effectiveImplementationBudget());
     }
 }

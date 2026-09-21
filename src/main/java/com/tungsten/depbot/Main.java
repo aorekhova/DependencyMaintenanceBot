@@ -36,6 +36,9 @@ import com.tungsten.depbot.progress.RemediationProgressListener;
 import com.tungsten.depbot.publication.GitLabApiClient;
 import com.tungsten.depbot.publication.GitLabConfig;
 import com.tungsten.depbot.publication.GitLabPublicationService;
+import com.tungsten.depbot.publication.MavenAndJenkinsStandalonePublicationValidator;
+import com.tungsten.depbot.publication.RemoteIdentityVerifier;
+import com.tungsten.depbot.publication.StandalonePublicationValidator;
 import com.tungsten.depbot.remediation.CohortsIndexJsonReader;
 import com.tungsten.depbot.remediation.RemediationPlanCommand;
 import com.tungsten.depbot.remediation.RemediationPlanService;
@@ -85,6 +88,14 @@ import java.util.function.Supplier;
  * remediation/candidate branches and commits are unaffected. The run remains fully publishable afterward
  * through the standalone {@code publish --run <run-id>} command.
  *
+ * <p>{@code remediate --input-report <path>} runs against an externally supplied actionable report
+ * instead of calling Mend -- for a project this environment has no Mend API access to, given a file
+ * already in this application's own {@link com.tungsten.depbot.report.actionable.ActionableReport} JSON
+ * shape (for example, built from a Mend UI export). {@link com.tungsten.depbot.cli.ScanCommand} is not run
+ * at all; every stage after it -- {@code plan-remediation}, grouping, both Claude roles, Plan Conformance,
+ * dependency validation, the full build, Jenkins, publication, reporting -- runs exactly as it does for a
+ * normal Mend-backed run, since none of it reads anything other than the published report file.
+ *
  * <p>{@code prepare-remediation-branches} and its deprecated {@code create-remediation-worktrees} alias
  * are <strong>legacy</strong>. They create one branch per severity from {@code origin/master} and write
  * the pre-two-phase task files, and nothing in {@code remediate} uses them any more -- a remediation
@@ -104,6 +115,7 @@ public final class Main {
     static final String REMEDIATE_COMMAND = "remediate";
     static final String DEPENDENCY_FLAG = "--dependency";
     static final String NO_PUBLISH_FLAG = "--no-publish";
+    static final String INPUT_REPORT_FLAG = "--input-report";
     static final String PUBLISH_COMMAND = "publish";
     static final String RUN_FLAG = "--run";
     static final String DRY_RUN_FLAG = "--dry-run";
@@ -260,8 +272,16 @@ public final class Main {
                 ReportDestination.defaultDestination().jsonPath(),
                 ReportDestination.remediationPlanDestination().jsonPath());
 
+        // Immediately after `remediate`, the same Maven/Jenkins gates remediation itself just used are
+        // still in scope -- reused here so a reconstructed, multi-group-cohort publication tree can
+        // actually be independently re-validated rather than unconditionally refused (see
+        // StandalonePublicationValidator's own javadoc). The standalone `publish` command has no such
+        // context and deliberately falls back to StandalonePublicationValidator.unavailable() instead.
+        StandalonePublicationValidator standalonePublicationValidator =
+                new MavenAndJenkinsStandalonePublicationValidator(git, new MavenBuildValidationGate(), jenkinsValidationService);
         GitLabPublicationService publicationService = new GitLabPublicationService(
-                repoPath, git, gitLabConfig, new GitLabApiClient(gitLabConfig), runService);
+                repoPath, git, gitLabConfig, new GitLabApiClient(gitLabConfig), runService,
+                new RemoteIdentityVerifier(), standalonePublicationValidator);
 
         return new RemediateCommand(scanCommand, planCommand, sourceReader, remediationService,
                 runService, reporter, clock, claudeConfig.model(), repoPath, RunIds::generate,
@@ -376,11 +396,15 @@ public final class Main {
 
     /**
      * Validates the command line and delegates to {@link RemediateCommand}. Accepts {@code remediate}
-     * (every library in the report), optionally followed by {@code --dependency groupId:artifactId} (a
-     * pilot run limited to that one library) and/or a trailing {@code --no-publish} (runs the whole
-     * pipeline but never calls {@link com.tungsten.depbot.publication.GitLabPublicationService} --
-     * a pilot/debug mode; automatic publication is the default with no flag) -- any other shape,
-     * including a missing value after {@code --dependency} or an unrecognised flag name, is a usage error.
+     * (every library in the report), optionally followed, in this order, by {@code --dependency
+     * groupId:artifactId} (a pilot run limited to that one library), {@code --input-report <path>} (an
+     * externally supplied actionable report, e.g. built from a Mend UI export for a project this
+     * environment has no Mend API access to -- Mend is not called at all when this flag is present) and/or
+     * a trailing {@code --no-publish} (runs the whole pipeline but never calls {@link
+     * com.tungsten.depbot.publication.GitLabPublicationService} -- a pilot/debug mode; automatic
+     * publication is the default with no flag) -- any other shape, including a missing value after {@code
+     * --dependency}/{@code --input-report}, an unrecognised flag name, or the three flags out of order, is
+     * a usage error.
      */
     static ExitCode runRemediate(String[] args, ConsoleReporter reporter, RemediateCommand remediateCommand) {
         ParsedRemediateArgs parsed = parseRemediateArgs(args);
@@ -388,27 +412,51 @@ public final class Main {
             reporter.printUsage();
             return ExitCode.USAGE_ERROR;
         }
-        return remediateCommand.run(parsed.dependencyFilterRaw(), parsed.noPublish());
+        return remediateCommand.run(parsed.dependencyFilterRaw(), parsed.noPublish(), parsed.inputReportPath());
     }
 
-    private record ParsedRemediateArgs(String dependencyFilterRaw, boolean noPublish) {
+    private record ParsedRemediateArgs(String dependencyFilterRaw, boolean noPublish, Path inputReportPath) {
     }
 
+    /**
+     * A small sequential scanner rather than the length-based {@code switch} this replaced: with three
+     * independent optional flags, enumerating every valid argument-count/position combination by hand
+     * stops scaling. Each flag is checked at most once, in the fixed order {@code --dependency}, {@code
+     * --input-report}, {@code --no-publish} -- the same order the two original flags already had to appear
+     * in, now extended rather than changed, so every previously accepted or rejected shape of {@code
+     * remediate}/{@code --dependency}/{@code --no-publish} still parses exactly as before.
+     */
     private static ParsedRemediateArgs parseRemediateArgs(String[] args) {
         if (args == null || args.length < 1 || !REMEDIATE_COMMAND.equals(args[0])) {
             return null;
         }
-        return switch (args.length) {
-            case 1 -> new ParsedRemediateArgs(null, false);
-            case 2 -> NO_PUBLISH_FLAG.equals(args[1])
-                    ? new ParsedRemediateArgs(null, true)
-                    : null;
-            case 3 -> DEPENDENCY_FLAG.equals(args[1]) ? new ParsedRemediateArgs(args[2], false) : null;
-            case 4 -> DEPENDENCY_FLAG.equals(args[1]) && NO_PUBLISH_FLAG.equals(args[3])
-                    ? new ParsedRemediateArgs(args[2], true)
-                    : null;
-            default -> null;
-        };
+        int i = 1;
+        String dependencyFilterRaw = null;
+        Path inputReportPath = null;
+        boolean noPublish = false;
+
+        if (i < args.length && DEPENDENCY_FLAG.equals(args[i])) {
+            if (i + 1 >= args.length) {
+                return null;
+            }
+            dependencyFilterRaw = args[i + 1];
+            i += 2;
+        }
+        if (i < args.length && INPUT_REPORT_FLAG.equals(args[i])) {
+            if (i + 1 >= args.length) {
+                return null;
+            }
+            inputReportPath = Path.of(args[i + 1]);
+            i += 2;
+        }
+        if (i < args.length && NO_PUBLISH_FLAG.equals(args[i])) {
+            noPublish = true;
+            i += 1;
+        }
+        if (i != args.length) {
+            return null;
+        }
+        return new ParsedRemediateArgs(dependencyFilterRaw, noPublish, inputReportPath);
     }
 
     /**

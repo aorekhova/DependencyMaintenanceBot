@@ -202,12 +202,23 @@ class RemediateCommandTest {
 
     private RemediateCommand command(
             FakeClaude fake, RemediationValidationGate gate, FullBuildValidationGate buildGate) {
+        return command(fake, gate, buildGate, mendReporting());
+    }
+
+    /** Used by the {@code --input-report} tests to prove Mend is never contacted on that path. */
+    private RemediateCommand command(FakeClaude fake, MendGateway gateway) {
+        return command(fake, Implementations.passingGate(), Implementations.passingBuildGate(), gateway);
+    }
+
+    private RemediateCommand command(
+            FakeClaude fake, RemediationValidationGate gate, FullBuildValidationGate buildGate,
+            MendGateway gateway) {
         ReportDestination scanDestination = ReportDestination.into(reportDir());
         ReportDestination planDestination = new ReportDestination(reportDir(),
                 ReportDestination.REMEDIATION_PLAN_JSON_FILE_NAME,
                 ReportDestination.REMEDIATION_PLAN_MARKDOWN_FILE_NAME);
 
-        ScanCommand scanCommand = new ScanCommand(() -> CONFIG, mendReporting(), reporter,
+        ScanCommand scanCommand = new ScanCommand(() -> CONFIG, gateway, reporter,
                 new ActionableReportService(FIXED_CLOCK, scanDestination));
         RemediationPlanCommand planCommand = new RemediationPlanCommand(
                 new RemediationPlanService(FIXED_CLOCK, scanDestination, planDestination), reporter);
@@ -676,5 +687,82 @@ class RemediateCommandTest {
         assertEquals(ExitCode.SUCCESS, code, err());
         assertTrue(summary().contains("\"dependencyFilter\" : null"), summary());
         assertTrue(out().contains("Remediating 1 library/libraries"), out());
+    }
+
+    // ---- --input-report: an externally supplied actionable report, no Mend call --------------------
+
+    /** Never reachable when {@code --input-report} is used: proves Mend is genuinely not contacted. */
+    private static final MendGateway FAILS_IF_CALLED = config -> {
+        throw new AssertionError("Mend must not be called when --input-report is used");
+    };
+
+    /**
+     * Builds a real, on-disk {@link com.tungsten.depbot.report.actionable.ActionableReport} JSON file --
+     * this application's own published shape, exactly as an operator would prepare one from a Mend UI
+     * export -- describing the same finding {@link #mendReporting()} would have reported, so the rest of
+     * the fixture (Claude's assessment/implementation JSON, the expected branch/commit) still applies
+     * unchanged.
+     */
+    private Path externalActionableReportFile() throws Exception {
+        List<VulnerabilityRecord> vulnerabilities =
+                mendReporting().fetchVulnerabilityReport(CONFIG).vulnerabilities();
+        ActionableReportService externalService = new ActionableReportService(
+                FIXED_CLOCK, ReportDestination.into(tempDir.resolve("external-input")));
+        var written = externalService.generate(
+                vulnerabilities, com.tungsten.depbot.report.SeverityCounts.from(vulnerabilities));
+        return written.jsonPath();
+    }
+
+    @Test
+    @DisplayName("--input-report runs the whole pipeline from an externally supplied report, without ever "
+            + "contacting Mend")
+    void inputReportRunsThePipelineWithoutCallingMend() throws Exception {
+        Path externalFile = externalActionableReportFile();
+        FakeClaude fake = bothPhases(Assessments.json(), Implementations.completedJson());
+
+        ExitCode code = command(fake, FAILS_IF_CALLED).run(COORDINATES, false, externalFile);
+
+        assertEquals(ExitCode.SUCCESS, code, err());
+        assertTrue(out().contains("Input report:"), out());
+        assertTrue(out().contains(externalFile.toString()), out());
+        assertTrue(out().contains("(Mend API not called)"), out());
+        assertEquals(List.of("assessment", "implementation"), fake.recordedPhaseSequence());
+        assertEquals(GitTestRepos.shaOf(repo, "refs/remotes/origin/release/9.2"),
+                GitTestRepos.readOutput(repo, "git", "log", "--format=%H", expectedBranch)
+                        .lines().skip(1).findFirst().orElseThrow(),
+                "the pipeline downstream of the supplied report is completely unaffected");
+        assertEquals(
+                Files.readString(externalFile, StandardCharsets.UTF_8),
+                Files.readString(reportDir().resolve(ReportDestination.DEFAULT_JSON_FILE_NAME), StandardCharsets.UTF_8),
+                "the published report at the canonical path must be an exact copy of the supplied file");
+    }
+
+    @Test
+    @DisplayName("--input-report with a missing file is a remediation-source error, and Mend is still "
+            + "never contacted")
+    void inputReportMissingFileIsASourceError() throws Exception {
+        FakeClaude fake = bothPhases(Assessments.json(), Implementations.completedJson());
+        Path missing = tempDir.resolve("does-not-exist.json");
+
+        ExitCode code = command(fake, FAILS_IF_CALLED).run(COORDINATES, false, missing);
+
+        assertEquals(ExitCode.REMEDIATION_SOURCE_ERROR, code);
+        assertEquals(0, fake.invocationCount());
+        assertTrue(err().contains(missing.toString()), err());
+    }
+
+    @Test
+    @DisplayName("--input-report with malformed JSON is a remediation-source error, and Mend is still "
+            + "never contacted")
+    void inputReportMalformedJsonIsASourceError() throws Exception {
+        FakeClaude fake = bothPhases(Assessments.json(), Implementations.completedJson());
+        Path malformed = tempDir.resolve("not-json.json");
+        Files.writeString(malformed, "this is not valid JSON", StandardCharsets.UTF_8);
+
+        ExitCode code = command(fake, FAILS_IF_CALLED).run(COORDINATES, false, malformed);
+
+        assertEquals(ExitCode.REMEDIATION_SOURCE_ERROR, code);
+        assertEquals(0, fake.invocationCount());
+        assertTrue(err().contains(malformed.toString()), err());
     }
 }

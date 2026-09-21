@@ -97,7 +97,9 @@ public final class BatchAnalysisSchemaRepairPromptRenderer {
         lines.add("The required document shape (every field, exactly as your original analysis was asked "
                 + "for -- in particular, every `plannedChanges` entry needs an explicit `changeType`, one "
                 + "of `VERSION_BUMP`, `DEPENDENCY_MANAGEMENT_ADDITION`, `EXCLUSION_ADDED`, or `OTHER` with "
-                + "a concrete `reason` -- never omitted):");
+                + "a concrete `reason` -- never omitted; an `EXCLUSION_ADDED` entry additionally needs a "
+                + "non-empty `excludedCoordinates`, naming what is excluded from the host named in "
+                + "`dependencyCoordinates` -- never left to `reason`'s prose alone):");
         lines.add("");
         lines.add("```json");
         lines.add(BatchAnalysisPromptRenderer.OUTPUT_SCHEMA);

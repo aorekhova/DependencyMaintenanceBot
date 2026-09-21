@@ -142,6 +142,16 @@ public final class ConsoleReporter {
         writeErr("Invalid --dependency value: " + safeMessage);
     }
 
+    /**
+     * Announces a {@code remediate --input-report <path>} run, printed once, before plan-remediation
+     * runs, so the operator sees immediately that Mend was not, and will not be, contacted for this run.
+     */
+    public void printInputReportUsed(Path inputReportPath) {
+        writeOut("Input report:");
+        writeOut(inputReportPath.toString());
+        writeOut("(Mend API not called)");
+    }
+
     /** The {@code --dependency} coordinates do not match any library that can become a remediation unit. */
     public void printDependencyNotFoundError(String safeMessage) {
         writeErr("Dependency filter error: " + safeMessage);

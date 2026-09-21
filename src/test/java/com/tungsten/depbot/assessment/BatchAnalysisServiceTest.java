@@ -559,6 +559,175 @@ class BatchAnalysisServiceTest {
                 """.formatted(plannedChanges.toString().indent(8));
     }
 
+    // ---- contradictory plannedChanges (FreeMarker-style case, run 20260919-221201-636b49) ---------------
+
+    /** A group whose plannedChanges lists {@code com.example:library-a} in {@code pom.xml} twice, with
+     *  incompatible changeTypes when {@code contradictory} is true, or just the correct single entry
+     *  otherwise. */
+    private static String contradictoryPlannedChangesJson(boolean contradictory) {
+        String plannedChanges = contradictory
+                ? """
+                {
+                  "dependencyCoordinates": "com.example:library-a",
+                  "targetVersion": "1.1",
+                  "affectedFile": "pom.xml",
+                  "changeType": "VERSION_BUMP",
+                  "reason": "bump the control point"
+                },
+                {
+                  "dependencyCoordinates": "com.example:library-a",
+                  "targetVersion": "1.1",
+                  "affectedFile": "pom.xml",
+                  "changeType": "DEPENDENCY_MANAGEMENT_ADDITION",
+                  "reason": "add a managed entry for the real coordinate"
+                }
+                """
+                : """
+                {
+                  "dependencyCoordinates": "com.example:library-a",
+                  "targetVersion": "1.1",
+                  "affectedFile": "pom.xml",
+                  "changeType": "DEPENDENCY_MANAGEMENT_ADDITION",
+                  "reason": "add a managed entry for the real coordinate, fixing the wrong-artifactId one"
+                }
+                """;
+        return """
+                {
+                  "schemaVersion": "1.0",
+                  "findings": [
+                    {
+                      "coordinates": "com.example:library-a",
+                      "vulnerabilityIds": ["CVE-2026-1"],
+                      "summary": "the control point never actually managed this coordinate",
+                      "conclusion": "REMEDIATION_REQUIRED",
+                      "remediationGroupId": "g-library-a",
+                      "evidence": ["evidence"]
+                    }
+                  ],
+                  "remediationGroups": [
+                    {
+                      "groupId": "g-library-a",
+                      "memberCoordinates": ["com.example:library-a"],
+                      "groupingReason": "a single finding",
+                      "sourceRef": "origin/release/9.2",
+                      "sourceCommitSha": "0123456789abcdef0123456789abcdef01234567",
+                      "origin": "DEPENDENCY_MANAGEMENT",
+                      "dependencyRelationship": "declared directly",
+                      "observedVersion": "1.0",
+                      "recommendedRemediation": "fix the control point and raise the version",
+                      "recommendedTargetVersion": "1.1",
+                      "affectedFiles": ["pom.xml"],
+                      "impactScore": 2,
+                      "impactReason": "one control point",
+                      "automationSafety": "AUTOMATIC_ALLOWED",
+                      "automationSafetyReason": "a routine dependencyManagement fix",
+                      "implementationPlan": ["fix the control point"],
+                      "validationPlan": ["run dependency:tree"],
+                      "plannedChanges": [
+                %s
+                      ]
+                    }
+                  ]
+                }
+                """.formatted(plannedChanges.indent(8));
+    }
+
+    @Test
+    @DisplayName("a mechanically-confirmed contradictory plannedChanges pair (FreeMarker-shaped) triggers "
+            + "exactly one bounded schema-repair call, and the repaired document is accepted as COMPLETE")
+    void contradictoryPlannedChangesTriggersOneSchemaRepairThenSucceeds() throws Exception {
+        Files.writeString(workspace.resolve("pom.xml"), """
+                <project>
+                  <dependencyManagement>
+                    <dependencies>
+                      <dependency>
+                        <groupId>com.example</groupId>
+                        <artifactId>wrong-artifact-name</artifactId>
+                        <version>1.0</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """);
+        VulnerabilityWorkItem workItem = new VulnerabilityWorkItem(
+                "com.example", "library-a", "1.0", "HIGH", "1.1", List.of());
+
+        FakeClaude fake = FakeClaude.in(tempDir)
+                .respondingTo(ClaudePhase.ASSESSMENT, Assessments.claudeOutput(
+                        Assessments.answerContaining(contradictoryPlannedChangesJson(true))))
+                .respondingToAssessmentSchemaRepair(Assessments.claudeOutput(
+                        Assessments.answerContaining(contradictoryPlannedChangesJson(false))))
+                .build();
+
+        BatchAnalysisService service = service(fake, config(fake));
+        BatchAnalysisOutcome outcome = service.analyze(context(workItem));
+
+        assertEquals(BatchAnalysisStatus.COMPLETE, outcome.status());
+        assertTrue(outcome.hasAnalysis());
+        assertEquals(List.of("assessment", "assessment-schema-repair"), fake.recordedPhaseSequence(),
+                "exactly one repair call, never a real second investigation attempt");
+
+        BatchAnalysisAttempt attempt = readAttempt(service);
+        assertTrue(attempt.schemaRepairUsed());
+        assertEquals(AnalysisInvocationOutcomeReason.CONTRADICTORY_PLANNED_CHANGES,
+                attempt.attempt1().outcomeReason());
+        assertEquals(1, outcome.analysis().remediationGroups().get(0).plannedChanges().size());
+    }
+
+    @Test
+    @DisplayName("an ordinary ANALYSIS_VALIDATION_FAILED problem (e.g. missing automationSafety) remains "
+            + "NOT schema-repair-eligible -- this fix must never widen that existing boundary")
+    void analysisValidationFailedRemainsNotSchemaRepairEligible() throws Exception {
+        String missingAutomationSafety = """
+                {
+                  "schemaVersion": "1.0",
+                  "findings": [
+                    {
+                      "coordinates": "com.example:library-a",
+                      "vulnerabilityIds": ["CVE-2026-1"],
+                      "summary": "needs remediation",
+                      "conclusion": "REMEDIATION_REQUIRED",
+                      "remediationGroupId": "g-library-a",
+                      "evidence": ["evidence"]
+                    }
+                  ],
+                  "remediationGroups": [
+                    {
+                      "groupId": "g-library-a",
+                      "memberCoordinates": ["com.example:library-a"],
+                      "groupingReason": "a single finding",
+                      "recommendedRemediation": "bump the version",
+                      "implementationPlan": ["bump the version"],
+                      "validationPlan": ["run dependency:tree"],
+                      "impactScore": 2,
+                      "impactReason": "a small bump",
+                      "plannedChanges": []
+                    }
+                  ]
+                }
+                """;
+        VulnerabilityWorkItem workItem = new VulnerabilityWorkItem(
+                "com.example", "library-a", "1.0", "HIGH", "1.1", List.of());
+
+        FakeClaude fake = FakeClaude.in(tempDir)
+                .respondingTo(ClaudePhase.ASSESSMENT, Assessments.claudeOutput(
+                        Assessments.answerContaining(missingAutomationSafety)))
+                .build();
+
+        BatchAnalysisService service = service(fake, config(fake));
+        BatchAnalysisOutcome outcome = service.analyze(context(workItem));
+
+        assertEquals(BatchAnalysisStatus.FAILED, outcome.status());
+        assertFalse(outcome.hasAnalysis());
+        assertEquals(List.of("assessment"), fake.recordedPhaseSequence(),
+                "no schema-repair call may be attempted for an ordinary ANALYSIS_VALIDATION_FAILED problem");
+
+        BatchAnalysisAttempt attempt = readAttempt(service);
+        assertFalse(attempt.schemaRepairUsed());
+        assertEquals(AnalysisInvocationOutcomeReason.ANALYSIS_VALIDATION_FAILED,
+                attempt.attempt1().outcomeReason());
+    }
+
     private static String jsonQuoted(String value) {
         StringBuilder quoted = new StringBuilder("\"");
         for (char character : value.toCharArray()) {

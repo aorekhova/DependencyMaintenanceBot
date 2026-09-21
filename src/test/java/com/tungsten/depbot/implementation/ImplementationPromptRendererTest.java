@@ -4,6 +4,7 @@ import com.tungsten.depbot.assessment.AnalysisRemediationGroup;
 import com.tungsten.depbot.assessment.Assessments;
 import com.tungsten.depbot.assessment.VulnerabilityWorkItem;
 import com.tungsten.depbot.claude.ClaudePhase;
+import com.tungsten.depbot.remediation.RejectionStage;
 import com.tungsten.depbot.report.SecretRedactor;
 import com.tungsten.depbot.report.actionable.AffectedLibrary;
 import org.junit.jupiter.api.DisplayName;
@@ -452,6 +453,25 @@ class ImplementationPromptRendererTest {
     }
 
     @Test
+    @DisplayName("run 20260920-052841-210614: an EXCLUSION_ADDED entry's host and excludedCoordinates are "
+            + "both rendered explicitly, never left for the Remediation Engineer to infer from reason alone")
+    void exclusionAddedEntryRendersHostAndExcludedCoordinatesExplicitly() {
+        AnalysisRemediationGroup group = Assessments.withPlannedChanges(Assessments.remediationGroup(2),
+                List.of(new com.tungsten.depbot.assessment.PlannedDependencyChange(
+                        "org.kordamp.json:json-lib-core", null, null, "pom.xml",
+                        com.tungsten.depbot.assessment.PlannedChangeType.EXCLUSION_ADDED,
+                        "excludes junit and jcl-over-slf4j from json-lib-core",
+                        List.of("junit:junit", "org.slf4j:jcl-over-slf4j"))));
+        String prompt = new ImplementationPromptRenderer()
+                .render(Implementations.context(WORKSPACE, BASE_SHA, group));
+
+        assertTrue(prompt.contains("org.kordamp.json:json-lib-core"), prompt);
+        assertTrue(prompt.contains("junit:junit"), prompt);
+        assertTrue(prompt.contains("org.slf4j:jcl-over-slf4j"), prompt);
+        assertTrue(prompt.contains("excluding"), prompt);
+    }
+
+    @Test
     @DisplayName("the plan-deviation stop rule is always present, naming the conclusion and what it requires")
     void planDeviationStopRuleIsAlwaysPresent() {
         String prompt = prompt();
@@ -484,6 +504,43 @@ class ImplementationPromptRendererTest {
         assertTrue(prompt.contains(repair.failedStage().name()), prompt);
         assertTrue(prompt.contains(repair.exactErrorEvidenceSummary()), prompt);
         assertTrue(prompt.contains(repair.dependencyValidationOutcome().reason()), prompt);
+    }
+
+    // ---- Bug 2 (run 20260920-031107-148632): a later attempt keeps every earlier attempt's own evidence ----
+
+    @Test
+    @DisplayName("an attempt 3 repair context carries forward what attempt 1 and attempt 2 each established, "
+            + "not only the immediately preceding attempt's own failure")
+    void priorAttemptsEvidenceIsRenderedAlongsideTheCurrentFailure() {
+        RepairContext attempt3Context = new RepairContext(
+                "--- a/test-services/pom.xml\n+++ b/test-services/pom.xml\n",
+                RejectionStage.PLAN_DEVIATION_REQUIRED,
+                null, null, null, null,
+                List.of("unauthorized file changed: test-services/pom.xml"),
+                "plan conformance check failed: unauthorized file changed: test-services/pom.xml",
+                List.of(
+                        "the dependency-resolution gate did not pass: TestServices -> jaxbjsonsdo:2.2 -> "
+                                + "net.sf.json-lib:json-lib:2.4 remained on the resolved classpath",
+                        "This attempt itself additionally reported: added an exclusion for "
+                                + "net.sf.json-lib:json-lib to test-services/pom.xml, which removed the "
+                                + "vulnerable path from the reactor"));
+        ImplementationContext base = Implementations.context(WORKSPACE, BASE_SHA);
+        ImplementationContext attempt3 = new ImplementationContext(
+                base.runId(), base.unitId(), base.workspace(), base.branchName(), base.branchBaseSha(),
+                base.verifiedSourceRef(), base.group(), base.members(), base.companionCoordinates(),
+                base.priority(), base.executionOrder(), base.partialAnalysisState(), attempt3Context, 3);
+
+        String prompt = new ImplementationPromptRenderer().render(attempt3);
+
+        assertTrue(prompt.contains("What earlier attempts at this same remediation already established"),
+                prompt);
+        assertTrue(prompt.contains("net.sf.json-lib:json-lib:2.4 remained on the resolved classpath"),
+                "attempt 1's own dependency-validation finding must not be lost: " + prompt);
+        assertTrue(prompt.contains("removed the vulnerable path from the reactor"),
+                "attempt 2's own report of what it discovered and fixed must not be lost: " + prompt);
+        assertTrue(prompt.contains("unauthorized file changed: test-services/pom.xml"),
+                "attempt 2's own rejection reason (the current, most recent failure) must still be present: "
+                        + prompt);
     }
 
     // ---- Bug 3 (pilot 20260909-061155-6ca4db): the remainingWork contract is strengthened -----------

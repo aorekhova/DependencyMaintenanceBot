@@ -2,6 +2,7 @@ package com.tungsten.depbot.publication;
 
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.tungsten.depbot.git.GitCommandRunner;
+import com.tungsten.depbot.git.RemediationBranchName;
 import com.tungsten.depbot.humanreview.HumanReviewReport;
 import com.tungsten.depbot.humanreview.HumanReviewService;
 import com.tungsten.depbot.remediation.CohortIntegrationFailureOutcome;
@@ -12,7 +13,6 @@ import com.tungsten.depbot.remediation.RemediationReport;
 import com.tungsten.depbot.remediation.RemediationSummary;
 import com.tungsten.depbot.remediation.RemediationSummaryEntry;
 import com.tungsten.depbot.run.RemediationRunService;
-import com.tungsten.depbot.validation.ValidationStatus;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -27,42 +27,63 @@ import java.util.Optional;
 
 /**
  * The publication layer, entirely new and entirely separate from the remediation/grouping/Human Review
- * core flow it sits on top of: verifies the git remote is genuinely the configured GitLab project, pushes
- * each eligible cohort's already-committed shared branch, opens or reuses one Merge Request per cohort
- * targeting its verified source ref, publishes every successful commit's own {@link RemediationReport}
- * against that commit's SHA, opens or reuses one GitLab Issue per Human Review group, and keeps every
- * Merge Request's description in sync with a whole-run summary. Claude is never involved in any of this
- * -- every fact published here already exists in an artifact Claude (or the bot's own validation/build
- * gates) produced earlier; this class only pushes, calls the GitLab API, and renders already-final
- * documents as Markdown.
+ * core flow it sits on top of: verifies the git remote is genuinely the configured GitLab project, then
+ * publishes every remediation GROUP as its own, isolated external publication unit -- ONE REMEDIATION
+ * GROUP = ONE EXTERNAL PUBLICATION UNIT, never combined with a sibling's, even when several groups shared
+ * one cohort/branch during remediation itself. Claude is never involved in any of this -- every fact
+ * published here already exists in an artifact Claude (or the bot's own validation/build gates) produced
+ * earlier; this class only pushes, calls the GitLab API, and renders already-final documents as Markdown.
+ *
+ * <p><strong>A cohort's shared branch is a remediation/validation concern, not a publication one.</strong>
+ * Remediation may still fast-forward several groups' commits onto one shared branch for cumulative
+ * validation -- that is completely unchanged. Publication, however, always resolves ONE isolated
+ * publication branch per commit: for a single-commit cohort (the overwhelmingly common case, and always
+ * true for a {@code RISKY_SINGLE_GROUP} cohort), that is simply {@code cohort.branchName()} itself, exactly
+ * as before. For a multi-commit cohort, every commit gets its own, freshly (re)computed, disposable local
+ * branch -- the first commit's own tree is already exactly {@code base + (that group alone)} and is reused
+ * directly (no cherry-pick, no re-validation: it was already validated standalone, since its own candidate
+ * was cut directly from the cohort's verified SHA); every other commit's tree is reconstructed via {@code
+ * git cherry-pick} onto the cohort's verified SHA and, because a clean cherry-pick only proves textual
+ * mergeability -- never that the resulting tree still resolves its dependencies, builds, and passes Jenkins
+ * the way the cohort's own cumulative validation did -- is independently re-validated by {@link
+ * StandalonePublicationValidator} before it may ever be published. A cherry-pick conflict or a failed
+ * re-validation fails closed for that ONE group only; sibling groups in the same cohort, each isolating
+ * from the cohort's own verified SHA independently, are never affected either way.
  *
  * <p><strong>Never trusts {@code cohorts.json} blindly.</strong> {@link PublicationEligibility}
  * re-derives, from each commit's own {@link RemediationReport}, that dependency validation, the full
  * local build, isolated Jenkins and final integration Jenkins all genuinely succeeded before a single
- * mutating call is made; {@link CohortRepositoryPreflight} independently confirms the local branch on
- * disk still matches the exact commit sequence {@code cohorts.json} recorded. Both run fresh on every
+ * mutating call is made -- purely per-commit, with no cohort-wide veto layered on top, so one group's own
+ * failure (never even committed, so it never reaches this check) can never block an independently
+ * successful sibling; {@link CohortRepositoryPreflight} independently confirms the local branch on disk
+ * still matches the exact commit sequence {@code cohorts.json} recorded. Both run fresh on every
  * {@code publish}/{@code preview} call -- publication can be a separate, later step reading files a
  * {@code remediate} run wrote earlier.
  *
  * <p><strong>Discovers before it ever mutates a Merge Request's branch.</strong> Before touching a
- * cohort, {@link #planCohort} looks up any existing Merge Request for its branch by stable identity
- * (source branch name) in <em>every</em> state. An {@code OPEN} one is never pushed to again (a second
- * push would change the diff a human may already be reviewing) -- only its remote branch is confirmed,
- * read-only, to still match the expected tip; a mismatch fails closed rather than force-pushing. A
- * {@code CLOSED} or {@code MERGED} one is never pushed to, never recreated, and never reopened -- the
- * cohort is reported {@link RemediationCohort.PublicationStatus#MERGE_REQUEST_CLOSED} or {@link
- * RemediationCohort.PublicationStatus#MERGED} and nothing further happens for it. Only when no Merge
- * Request exists at all does this class push and create one. This is what makes a retry unable to ever
- * undo a human's decision to close or merge a Merge Request.
+ * group, {@link #planGroup} looks up any existing Merge Request for its own isolated publication branch by
+ * stable identity (source branch name) in <em>every</em> state. An {@code OPEN} one is never pushed to
+ * again (a second push would change the diff a human may already be reviewing) -- only its remote branch
+ * is confirmed, read-only, to still match the expected tip; a mismatch fails closed rather than
+ * force-pushing. A {@code CLOSED} or {@code MERGED} one is never pushed to, never recreated, and never
+ * reopened -- the group is reported {@link RemediationCohort.PublicationStatus#MERGE_REQUEST_CLOSED} or
+ * {@link RemediationCohort.PublicationStatus#MERGED} and nothing further happens for it. Only when no
+ * Merge Request exists at all does this class push and create one. This is what makes a retry unable to
+ * ever undo a human's decision to close or merge a Merge Request.
  *
  * <p><strong>Idempotent by construction, not by any extra bookkeeping.</strong> Every GitLab-mutating
  * call is preceded by a "does this already exist" check keyed on something stable across retries -- the
  * branch name for the Merge Request, a marker embedded in the comment body for a commit's report, a
  * marker embedded in the issue description for a Human Review group -- so re-running {@link
  * #publish(String, CohortsIndex, RemediationSummary)} after a partial failure resumes exactly where it
- * left off. A cohort or group whose publication fails is recorded as {@link
+ * left off. A group or Human Review group whose publication fails is recorded as {@link
  * RemediationCohort.PublicationStatus#PUBLICATION_FAILED} / {@link IssuePublicationStatus#PUBLICATION_FAILED}
  * and nothing about its already-validated local commits is ever touched, reset or discarded because of it.
+ *
+ * <p><strong>No global, whole-run summary is ever published externally.</strong> A group's own Merge
+ * Request description describes only that one group's own {@link RemediationReport} -- never an
+ * aggregate of every group/cohort in the run. {@code reports/runs/<runId>/remediation-summary.json} and
+ * the console summary remain purely local artifacts.
  */
 public final class GitLabPublicationService {
 
@@ -93,9 +114,9 @@ public final class GitLabPublicationService {
     private final RemediationRunService runService;
     private final RemediationReportMarkdownRenderer remediationReportRenderer;
     private final HumanReviewReportMarkdownRenderer humanReviewReportRenderer;
-    private final PublicationSummaryMarkdownRenderer summaryRenderer;
     private final PublicationIndexJsonRenderer publicationIndexJsonRenderer;
     private final RemoteIdentityVerifier remoteIdentityVerifier;
+    private final StandalonePublicationValidator standalonePublicationValidator;
     private final JsonMapper mapper = JsonMapper.builder().build();
 
     public GitLabPublicationService(
@@ -112,7 +133,9 @@ public final class GitLabPublicationService {
      * piece worth injecting from outside this package even in production-shaped code, since a test that
      * exercises real git push mechanics against a local fixture repository cannot also satisfy a real
      * identity check against a real GitLab host (see {@code PublishCommandTest}, which needs exactly
-     * this).
+     * this). Standalone re-validation of a reconstructed, multi-group-cohort tree is unavailable through
+     * this constructor -- see {@link StandalonePublicationValidator#unavailable()} -- since this shape is
+     * also used by the standalone {@code publish} command, which has no Maven/Jenkins context of its own.
      */
     public GitLabPublicationService(
             Path repoPath,
@@ -121,10 +144,27 @@ public final class GitLabPublicationService {
             GitLabClient gitLabClient,
             RemediationRunService runService,
             RemoteIdentityVerifier remoteIdentityVerifier) {
+        this(repoPath, git, config, gitLabClient, runService, remoteIdentityVerifier,
+                StandalonePublicationValidator.unavailable());
+    }
+
+    /**
+     * As the six-argument constructor, but with an explicit {@link StandalonePublicationValidator} --
+     * used by the immediate post-{@code remediate} publication, which already has the same Maven/Jenkins
+     * context remediation itself used, so a reconstructed multi-group-cohort tree can actually be
+     * re-validated rather than unconditionally refused.
+     */
+    public GitLabPublicationService(
+            Path repoPath,
+            GitCommandRunner git,
+            GitLabConfig config,
+            GitLabClient gitLabClient,
+            RemediationRunService runService,
+            RemoteIdentityVerifier remoteIdentityVerifier,
+            StandalonePublicationValidator standalonePublicationValidator) {
         this(repoPath, git, config, gitLabClient, runService,
                 new RemediationReportMarkdownRenderer(), new HumanReviewReportMarkdownRenderer(),
-                new PublicationSummaryMarkdownRenderer(), new PublicationIndexJsonRenderer(),
-                remoteIdentityVerifier);
+                new PublicationIndexJsonRenderer(), remoteIdentityVerifier, standalonePublicationValidator);
     }
 
     GitLabPublicationService(
@@ -135,9 +175,9 @@ public final class GitLabPublicationService {
             RemediationRunService runService,
             RemediationReportMarkdownRenderer remediationReportRenderer,
             HumanReviewReportMarkdownRenderer humanReviewReportRenderer,
-            PublicationSummaryMarkdownRenderer summaryRenderer,
             PublicationIndexJsonRenderer publicationIndexJsonRenderer,
-            RemoteIdentityVerifier remoteIdentityVerifier) {
+            RemoteIdentityVerifier remoteIdentityVerifier,
+            StandalonePublicationValidator standalonePublicationValidator) {
         this.repoPath = Objects.requireNonNull(repoPath, "repoPath");
         this.git = Objects.requireNonNull(git, "git");
         this.config = Objects.requireNonNull(config, "config");
@@ -147,18 +187,18 @@ public final class GitLabPublicationService {
                 Objects.requireNonNull(remediationReportRenderer, "remediationReportRenderer");
         this.humanReviewReportRenderer =
                 Objects.requireNonNull(humanReviewReportRenderer, "humanReviewReportRenderer");
-        this.summaryRenderer = Objects.requireNonNull(summaryRenderer, "summaryRenderer");
         this.publicationIndexJsonRenderer =
                 Objects.requireNonNull(publicationIndexJsonRenderer, "publicationIndexJsonRenderer");
         this.remoteIdentityVerifier = Objects.requireNonNull(remoteIdentityVerifier, "remoteIdentityVerifier");
+        this.standalonePublicationValidator =
+                Objects.requireNonNull(standalonePublicationValidator, "standalonePublicationValidator");
     }
 
     /**
      * Every read-only check {@link #publish} would perform -- remote identity, eligibility, repository
      * preflight, and discovering any already-existing Merge Request/Issue -- rendered as a preview,
-     * without a single mutating call. Multi-cohort: one run can contain several cohorts (different
-     * verified source refs/SHAs), and each gets its own, separately reported {@link
-     * PublicationPreview.CohortPreview}.
+     * without a single mutating call. One run can contain several cohorts, and one cohort can contain
+     * several groups: every GROUP gets its own, separately reported {@link PublicationPreview.CohortPreview}.
      */
     public PublicationPreview preview(String runId, CohortsIndex cohortsIndex, RemediationSummary summary) {
         Objects.requireNonNull(runId, "runId");
@@ -166,13 +206,15 @@ public final class GitLabPublicationService {
         Objects.requireNonNull(summary, "summary");
 
         VerificationResult identity = verifyRemoteIdentity();
-        List<PublicationPreview.CohortPreview> cohortPreviews = new ArrayList<>();
+        List<PublicationPreview.CohortPreview> groupPreviews = new ArrayList<>();
         for (CohortsIndex.Entry cohort : cohortsIndex.cohorts()) {
-            if (!identity.verified()) {
-                cohortPreviews.add(ineligibleCohortPreview(cohort, identity.reason()));
-                continue;
+            for (CohortsIndex.Commit commit : cohort.commits()) {
+                if (!identity.verified()) {
+                    groupPreviews.add(ineligibleGroupPreview(cohort, commit, identity.reason()));
+                    continue;
+                }
+                groupPreviews.add(toGroupPreview(planGroup(runId, cohort, commit)));
             }
-            cohortPreviews.add(toCohortPreview(planCohort(cohort)));
         }
 
         List<PublicationPreview.HumanReviewGroupPreview> humanReviewPreviews = new ArrayList<>();
@@ -180,12 +222,13 @@ public final class GitLabPublicationService {
             humanReviewPreviews.add(toHumanReviewGroupPreview(runId, group, identity));
         }
 
-        return new PublicationPreview(runId, cohortPreviews, humanReviewPreviews);
+        return new PublicationPreview(runId, groupPreviews, humanReviewPreviews);
     }
 
     /**
-     * Publishes every eligible cohort in {@code cohortsIndex} and every distinct Human Review group in
-     * {@code summary}, then writes {@value #PUBLICATION_FILE}. Safe to call again for the same run:
+     * Publishes every eligible GROUP in {@code cohortsIndex} -- one per commit, never combined with a
+     * sibling's, whatever cohort they shared during remediation -- and every distinct Human Review group
+     * in {@code summary}, then writes {@value #PUBLICATION_FILE}. Safe to call again for the same run:
      * nothing already published is republished or duplicated, and nothing already closed or merged by a
      * human is ever reopened, recreated, or pushed to again.
      */
@@ -199,34 +242,20 @@ public final class GitLabPublicationService {
             return writeAndReturn(runId, identityFailureIndex(runId, cohortsIndex, summary, identity.reason()));
         }
 
-        List<PublicationIndex.CohortPublication> cohortPublications = new ArrayList<>();
-        List<RunPublicationSummary.CommitSummary> publishedCommitSummaries = new ArrayList<>();
+        List<PublicationIndex.CohortPublication> groupPublications = new ArrayList<>();
         for (CohortsIndex.Entry cohort : cohortsIndex.cohorts()) {
-            CohortResult result = executeCohortPlan(planCohort(cohort));
-            cohortPublications.add(result.publication());
-            publishedCommitSummaries.addAll(result.commitSummaries());
+            for (CohortsIndex.Commit commit : cohort.commits()) {
+                groupPublications.add(executeGroupPlan(planGroup(runId, cohort, commit)).publication());
+            }
         }
 
         List<HumanReviewGroup> humanReviewGroups = distinctHumanReviewGroups(summary);
         List<PublicationIndex.HumanReviewPublication> humanReviewPublications = new ArrayList<>();
-        List<RunPublicationSummary.HumanReviewSummary> humanReviewSummaries = new ArrayList<>();
         for (HumanReviewGroup group : humanReviewGroups) {
-            PublicationIndex.HumanReviewPublication publication = publishHumanReviewGroup(runId, group);
-            humanReviewPublications.add(publication);
-            humanReviewSummaries.add(new RunPublicationSummary.HumanReviewSummary(
-                    group.memberCoordinates(), publication.issueUrl()));
+            humanReviewPublications.add(publishHumanReviewGroup(runId, group));
         }
 
-        String runSummaryMarkdown = summaryRenderer.render(
-                new RunPublicationSummary(runId, publishedCommitSummaries, humanReviewSummaries));
-        for (PublicationIndex.CohortPublication cohort : cohortPublications) {
-            if (cohort.status() == RemediationCohort.PublicationStatus.MERGE_REQUEST_OPENED
-                    && cohort.mergeRequestIid() != null) {
-                gitLabClient.updateMergeRequestDescription(cohort.mergeRequestIid(), runSummaryMarkdown);
-            }
-        }
-
-        return writeAndReturn(runId, new PublicationIndex(runId, cohortPublications, humanReviewPublications));
+        return writeAndReturn(runId, new PublicationIndex(runId, groupPublications, humanReviewPublications));
     }
 
     private VerificationResult verifyRemoteIdentity() {
@@ -235,14 +264,18 @@ public final class GitLabPublicationService {
 
     private PublicationIndex identityFailureIndex(
             String runId, CohortsIndex cohortsIndex, RemediationSummary summary, String reason) {
-        List<PublicationIndex.CohortPublication> cohorts = cohortsIndex.cohorts().stream()
-                .map(cohort -> failedCohortResult(cohort, reason).publication())
-                .toList();
+        List<PublicationIndex.CohortPublication> groups = new ArrayList<>();
+        for (CohortsIndex.Entry cohort : cohortsIndex.cohorts()) {
+            for (CohortsIndex.Commit commit : cohort.commits()) {
+                groups.add(failedGroupResult(cohort.branchName(), cohort.verifiedSourceRef(),
+                        cohort.verifiedSourceSha(), reason).publication());
+            }
+        }
         List<PublicationIndex.HumanReviewPublication> humanReviewGroups = distinctHumanReviewGroups(summary).stream()
                 .map(group -> new PublicationIndex.HumanReviewPublication(group.groupKey(),
                         group.memberCoordinates(), IssuePublicationStatus.PUBLICATION_FAILED, null, null, reason))
                 .toList();
-        return new PublicationIndex(runId, cohorts, humanReviewGroups);
+        return new PublicationIndex(runId, groups, humanReviewGroups);
     }
 
     private PublicationIndex writeAndReturn(String runId, PublicationIndex index) {
@@ -255,185 +288,273 @@ public final class GitLabPublicationService {
     // ---- planning: every read-only step, shared between preview() and publish() ---------------------
 
     /**
-     * Everything read-only that must happen before a cohort can be mutated: load every commit's own
-     * report, evaluate {@link PublicationEligibility}, run {@link CohortRepositoryPreflight}, and
-     * discover any already-existing Merge Request for the cohort's branch, in any state. Never mutates
-     * anything -- {@link #preview} renders this directly; {@link #publish} additionally executes it via
-     * {@link #executeCohortPlan}.
+     * Everything read-only that must happen before ONE group's commit can be mutated: resolve its own
+     * isolated publication branch (see this class's own javadoc), re-validate a reconstructed one when
+     * required, load its own report, evaluate {@link PublicationEligibility}, run
+     * {@link CohortRepositoryPreflight} against the cohort's shared history, and discover any
+     * already-existing Merge Request for its own branch, in any state. Never mutates the remote --
+     * {@link #preview} renders this directly; {@link #publish} additionally executes it via
+     * {@link #executeGroupPlan}. Local git state (an isolated branch this method itself may create) is
+     * the one exception: resolving a reconstructed tree is unavoidably a local git operation, never a
+     * network one.
      */
-    private CohortPlan planCohort(CohortsIndex.Entry cohort) {
-        Map<String, RemediationReport> reportsByCommitSha = new LinkedHashMap<>();
-        for (CohortsIndex.Commit commit : cohort.commits()) {
-            try {
-                reportsByCommitSha.put(commit.commitSha(), readRemediationReport(commit.remediationReportPath()));
-            } catch (RuntimeException e) {
-                return CohortPlan.ineligible(cohort, "could not read the Remediation Report for commit "
-                        + commit.commitSha() + " (group " + commit.groupId() + "): " + e.getMessage());
-            }
+    private GroupPlan planGroup(String runId, CohortsIndex.Entry cohort, CohortsIndex.Commit commit) {
+        RemediationReport report;
+        try {
+            report = readRemediationReport(commit.remediationReportPath());
+        } catch (RuntimeException e) {
+            return GroupPlan.ineligible(cohort, commit, cohort.branchName(),
+                    "could not read the Remediation Report for commit " + commit.commitSha()
+                            + " (group " + commit.groupId() + "): " + e.getMessage());
         }
 
-        EligibilityResult eligibility = PublicationEligibility.evaluate(cohort, reportsByCommitSha);
+        EligibilityResult eligibility = PublicationEligibility.evaluate(commit, report);
         if (!eligibility.eligible()) {
-            return CohortPlan.ineligible(cohort, eligibility.reason());
+            return GroupPlan.ineligible(cohort, commit, cohort.branchName(), eligibility.reason());
         }
 
         PreflightResult preflight = CohortRepositoryPreflight.verify(git, repoPath, cohort);
         if (!preflight.ok()) {
-            return CohortPlan.ineligible(cohort, preflight.reason());
+            return GroupPlan.ineligible(cohort, commit, cohort.branchName(), preflight.reason());
+        }
+
+        PublicationBranchResolution branch = resolvePublicationBranch(runId, cohort, commit);
+        if (branch.failureReason() != null) {
+            return GroupPlan.ineligible(cohort, commit, branch.branchName(), branch.failureReason());
         }
 
         Optional<MergeRequestRef> existing;
         try {
-            existing = gitLabClient.findMergeRequestBySourceBranch(cohort.branchName());
+            existing = gitLabClient.findMergeRequestBySourceBranch(branch.branchName());
         } catch (RuntimeException e) {
-            return CohortPlan.ineligible(cohort, "could not look up an existing merge request: " + e.getMessage());
+            return GroupPlan.ineligible(cohort, commit, branch.branchName(),
+                    "could not look up an existing merge request: " + e.getMessage());
         }
 
-        return CohortPlan.planned(cohort, reportsByCommitSha, preflight.expectedTip(), existing.orElse(null));
+        return GroupPlan.planned(
+                cohort, commit, branch.branchName(), report, branch.expectedTip(), existing.orElse(null));
+    }
+
+    /**
+     * Resolves the one isolated branch/expected-tip pair {@code commit} publishes under -- see this
+     * class's own javadoc for the single-commit vs. multi-commit cohort distinction. Only ever mutates
+     * LOCAL git state (branch creation, checkout, cherry-pick); never pushes, never calls GitLab.
+     */
+    private PublicationBranchResolution resolvePublicationBranch(
+            String runId, CohortsIndex.Entry cohort, CohortsIndex.Commit commit) {
+        if (cohort.commits().size() == 1) {
+            return PublicationBranchResolution.resolved(cohort.branchName(), commit.commitSha());
+        }
+
+        String isolatedBranch = RemediationBranchName.forPublicationIsolation(
+                runId, cohort.verifiedSourceRef(), cohort.verifiedSourceSha(), commit.groupId());
+        boolean isFirst = cohort.commits().get(0).equals(commit);
+
+        String originalHead;
+        try {
+            originalHead = git.currentHeadSha(repoPath);
+        } catch (RuntimeException e) {
+            return PublicationBranchResolution.failed(isolatedBranch,
+                    "could not read the repository's current checkout: " + e.getMessage());
+        }
+
+        if (git.branchExistsLocally(repoPath, isolatedBranch)) {
+            git.deleteBranch(repoPath, isolatedBranch);
+        }
+
+        if (isFirst) {
+            // This commit's own candidate was cut directly from the cohort's verified SHA, so its tree
+            // already IS "base + (this group alone)" -- already validated standalone, no cherry-pick, no
+            // re-validation. Just a fresh ref pointing directly at it.
+            git.createBranch(repoPath, isolatedBranch, commit.commitSha());
+            return PublicationBranchResolution.resolved(isolatedBranch, commit.commitSha());
+        }
+
+        git.createBranch(repoPath, isolatedBranch, cohort.verifiedSourceSha());
+        git.checkout(repoPath, isolatedBranch);
+        String isolatedTip;
+        try {
+            isolatedTip = git.cherryPick(repoPath, commit.commitSha());
+        } catch (RuntimeException e) {
+            git.abortCherryPick(repoPath);
+            restoreCheckoutBestEffort(originalHead);
+            return PublicationBranchResolution.failed(isolatedBranch,
+                    "could not isolate this group's commit for standalone publication: cherry-pick conflict "
+                            + "against the verified source ref -- this group's change may depend on another "
+                            + "group's change: " + e.getMessage());
+        }
+        restoreCheckoutBestEffort(originalHead);
+
+        Optional<String> revalidationFailure = standalonePublicationValidator.revalidate(
+                runId, commit.groupId(), repoPath, cohort.verifiedSourceSha(), isolatedTip);
+        if (revalidationFailure.isPresent()) {
+            return PublicationBranchResolution.failed(isolatedBranch,
+                    "this group's change could not be independently re-validated in isolation from the "
+                            + "other group(s) in its cohort: " + revalidationFailure.get());
+        }
+        return PublicationBranchResolution.resolved(isolatedBranch, isolatedTip);
+    }
+
+    private void restoreCheckoutBestEffort(String originalHead) {
+        try {
+            git.checkout(repoPath, originalHead);
+        } catch (RuntimeException e) {
+            // Best-effort only -- see MavenAndJenkinsStandalonePublicationValidator's identical reasoning.
+        }
+    }
+
+    private record PublicationBranchResolution(String branchName, String expectedTip, String failureReason) {
+        static PublicationBranchResolution resolved(String branchName, String expectedTip) {
+            return new PublicationBranchResolution(branchName, expectedTip, null);
+        }
+
+        static PublicationBranchResolution failed(String branchName, String reason) {
+            return new PublicationBranchResolution(branchName, null, reason);
+        }
     }
 
     /**
      * Carries out exactly the policy required for each of a discovered Merge Request's possible states
-     * (or its absence) -- see this class's own javadoc for the full rationale.
+     * (or its absence) -- see this class's own javadoc for the full rationale. Operates on exactly ONE
+     * group's own isolated branch; a failure here never touches a sibling group's own plan/execution.
      */
-    private CohortResult executeCohortPlan(CohortPlan plan) {
-        CohortsIndex.Entry cohort = plan.cohort();
+    private GroupResult executeGroupPlan(GroupPlan plan) {
         if (!plan.eligible()) {
-            return failedCohortResult(cohort, plan.ineligibleReason());
+            return failedGroupResult(
+                    plan.branchName(), plan.cohort().verifiedSourceRef(), plan.cohort().verifiedSourceSha(),
+                    plan.ineligibleReason());
         }
 
         try {
             MergeRequestRef existing = plan.existingMergeRequest();
             if (existing == null) {
-                pushAndVerify(cohort, plan.expectedTip());
+                pushAndVerify(plan.branchName(), plan.expectedTip());
                 MergeRequestRef created = gitLabClient.createMergeRequest(
-                        cohort.branchName(), targetBranchFor(cohort.verifiedSourceRef()),
-                        mergeRequestTitle(cohort), "_(summary pending)_");
-                return publishCommitsAndFinish(plan, created, RemediationCohort.PublicationStatus.MERGE_REQUEST_OPENED);
+                        plan.branchName(), targetBranchFor(plan.cohort().verifiedSourceRef()),
+                        mergeRequestTitle(plan), mergeRequestDescription(plan.report()));
+                return publishCommitAndFinish(plan, created, RemediationCohort.PublicationStatus.MERGE_REQUEST_OPENED);
             }
 
             return switch (existing.state()) {
                 case OPEN -> {
-                    String remoteSha = git.lsRemoteSha(repoPath, config.remoteName(), cohort.branchName());
+                    String remoteSha = git.lsRemoteSha(repoPath, config.remoteName(), plan.branchName());
                     if (!plan.expectedTip().equals(remoteSha)) {
-                        yield failedCohortResult(cohort, "remote branch " + cohort.branchName()
-                                + " does not match the expected tip (expected " + plan.expectedTip()
-                                + ", remote has " + remoteSha
-                                + ") -- an open Merge Request already exists, so this is never force-pushed");
+                        yield failedGroupResult(plan.branchName(), plan.cohort().verifiedSourceRef(),
+                                plan.cohort().verifiedSourceSha(),
+                                "remote branch " + plan.branchName() + " does not match the expected tip "
+                                        + "(expected " + plan.expectedTip() + ", remote has " + remoteSha
+                                        + ") -- an open Merge Request already exists, so this is never force-pushed");
                     }
-                    yield publishCommitsAndFinish(plan, existing, RemediationCohort.PublicationStatus.MERGE_REQUEST_OPENED);
+                    yield publishCommitAndFinish(
+                            plan, existing, RemediationCohort.PublicationStatus.MERGE_REQUEST_OPENED);
                 }
-                case CLOSED -> terminalDiscoveredState(cohort, existing, RemediationCohort.PublicationStatus.MERGE_REQUEST_CLOSED);
-                case MERGED -> terminalDiscoveredState(cohort, existing, RemediationCohort.PublicationStatus.MERGED);
+                case CLOSED -> terminalDiscoveredState(plan, existing, RemediationCohort.PublicationStatus.MERGE_REQUEST_CLOSED);
+                case MERGED -> terminalDiscoveredState(plan, existing, RemediationCohort.PublicationStatus.MERGED);
             };
         } catch (RuntimeException e) {
-            return failedCohortResult(cohort, e.getMessage());
+            return failedGroupResult(plan.branchName(), plan.cohort().verifiedSourceRef(),
+                    plan.cohort().verifiedSourceSha(), e.getMessage());
         }
     }
 
     /**
      * A Merge Request was discovered CLOSED or MERGED: no push, no branch recreation, no reopening, no
-     * new Merge Request, and -- deliberately -- no commit reports posted either, so a retry never looks
+     * new Merge Request, and -- deliberately -- no commit report posted either, so a retry never looks
      * like fresh activity on an object a human has already closed or merged.
      */
-    private CohortResult terminalDiscoveredState(
-            CohortsIndex.Entry cohort, MergeRequestRef existing, RemediationCohort.PublicationStatus status) {
-        return new CohortResult(new PublicationIndex.CohortPublication(
-                cohort.branchName(), cohort.verifiedSourceRef(), cohort.verifiedSourceSha(), status,
-                existing.webUrl(), existing.iid(), List.of(), null), List.of());
+    private GroupResult terminalDiscoveredState(
+            GroupPlan plan, MergeRequestRef existing, RemediationCohort.PublicationStatus status) {
+        return new GroupResult(new PublicationIndex.CohortPublication(
+                plan.branchName(), plan.cohort().verifiedSourceRef(), plan.cohort().verifiedSourceSha(), status,
+                existing.webUrl(), existing.iid(), List.of(), null));
     }
 
     /**
-     * Pushes the cohort's branch -- only ever reached when no Merge Request exists for it yet -- and
-     * confirms, read-only, that the remote now genuinely carries the expected tip.
+     * Pushes the group's own isolated branch -- only ever reached when no Merge Request exists for it
+     * yet -- and confirms, read-only, that the remote now genuinely carries the expected tip.
      */
-    private void pushAndVerify(CohortsIndex.Entry cohort, String expectedTip) {
-        if (!cohort.branchName().startsWith(REMEDIATION_BRANCH_NAMESPACE)) {
+    private void pushAndVerify(String branchName, String expectedTip) {
+        if (!branchName.startsWith(REMEDIATION_BRANCH_NAMESPACE)) {
             throw new GitLabPublicationException(
                     "refusing to push a branch outside the " + REMEDIATION_BRANCH_NAMESPACE + " namespace: "
-                            + cohort.branchName());
+                            + branchName);
         }
-        git.push(repoPath, config.remoteName(), cohort.branchName());
-        String remoteSha = git.lsRemoteSha(repoPath, config.remoteName(), cohort.branchName());
+        git.push(repoPath, config.remoteName(), branchName);
+        String remoteSha = git.lsRemoteSha(repoPath, config.remoteName(), branchName);
         if (!expectedTip.equals(remoteSha)) {
-            throw new GitLabPublicationException("push to " + cohort.branchName() + " completed, but the "
+            throw new GitLabPublicationException("push to " + branchName + " completed, but the "
                     + "remote tip (" + remoteSha + ") does not match the expected tip (" + expectedTip + ")");
         }
     }
 
-    private CohortResult publishCommitsAndFinish(
-            CohortPlan plan, MergeRequestRef mergeRequest, RemediationCohort.PublicationStatus status) {
-        CohortsIndex.Entry cohort = plan.cohort();
-        List<PublicationIndex.PublishedCommit> publishedCommits = new ArrayList<>();
-        List<RunPublicationSummary.CommitSummary> commitSummaries = new ArrayList<>();
-        for (CohortsIndex.Commit commit : cohort.commits()) {
-            RemediationReport report = plan.reportsByCommitSha().get(commit.commitSha());
-            publishCommitReport(commit, report);
-            publishedCommits.add(new PublicationIndex.PublishedCommit(commit.groupId(), commit.commitSha(), true));
-            commitSummaries.add(new RunPublicationSummary.CommitSummary(
-                    commit.groupId(), commit.commitSha(), report.memberCoordinates(),
-                    report.dependencyValidationStatus() == ValidationStatus.PASSED, report.fullyBuildValidated()));
-        }
+    private GroupResult publishCommitAndFinish(
+            GroupPlan plan, MergeRequestRef mergeRequest, RemediationCohort.PublicationStatus status) {
+        publishCommitReport(plan.expectedTip(), plan.commit(), plan.report());
+        PublicationIndex.PublishedCommit publishedCommit =
+                new PublicationIndex.PublishedCommit(plan.commit().groupId(), plan.expectedTip(), true);
         PublicationIndex.CohortPublication publication = new PublicationIndex.CohortPublication(
-                cohort.branchName(), cohort.verifiedSourceRef(), cohort.verifiedSourceSha(), status,
-                mergeRequest.webUrl(), mergeRequest.iid(), publishedCommits, null);
-        return new CohortResult(publication, commitSummaries);
+                plan.branchName(), plan.cohort().verifiedSourceRef(), plan.cohort().verifiedSourceSha(), status,
+                mergeRequest.webUrl(), mergeRequest.iid(), List.of(publishedCommit), null);
+        return new GroupResult(publication);
     }
 
-    private CohortResult failedCohortResult(CohortsIndex.Entry cohort, String reason) {
-        return new CohortResult(new PublicationIndex.CohortPublication(
-                cohort.branchName(), cohort.verifiedSourceRef(), cohort.verifiedSourceSha(),
-                RemediationCohort.PublicationStatus.PUBLICATION_FAILED, null, null, List.of(), reason), List.of());
+    private GroupResult failedGroupResult(
+            String branchName, String verifiedSourceRef, String verifiedSourceSha, String reason) {
+        return new GroupResult(new PublicationIndex.CohortPublication(
+                branchName, verifiedSourceRef, verifiedSourceSha,
+                RemediationCohort.PublicationStatus.PUBLICATION_FAILED, null, null, List.of(), reason));
     }
 
-    private record CohortResult(
-            PublicationIndex.CohortPublication publication,
-            List<RunPublicationSummary.CommitSummary> commitSummaries) {
+    private record GroupResult(PublicationIndex.CohortPublication publication) {
     }
 
     /**
-     * What planning learned about one cohort, before anything is executed. {@code reportsByCommitSha} and
+     * What planning learned about one group's commit, before anything is executed. {@code report} and
      * {@code expectedTip} are populated only when {@code eligible}; {@code existingMergeRequest} is
      * {@code null} both when ineligible and when genuinely no Merge Request exists yet -- callers tell
-     * the two apart via {@code eligible}.
+     * the two apart via {@code eligible}. {@code branchName} is always populated -- the group's own
+     * isolated publication branch, whether or not planning past that point succeeded -- so an ineligible
+     * result can still be reported against the right branch name.
      */
-    private record CohortPlan(
+    private record GroupPlan(
             CohortsIndex.Entry cohort,
+            CohortsIndex.Commit commit,
+            String branchName,
             boolean eligible,
             String ineligibleReason,
-            Map<String, RemediationReport> reportsByCommitSha,
+            RemediationReport report,
             String expectedTip,
             MergeRequestRef existingMergeRequest) {
 
-        static CohortPlan ineligible(CohortsIndex.Entry cohort, String reason) {
-            return new CohortPlan(cohort, false, reason, Map.of(), null, null);
+        static GroupPlan ineligible(
+                CohortsIndex.Entry cohort, CohortsIndex.Commit commit, String branchName, String reason) {
+            return new GroupPlan(cohort, commit, branchName, false, reason, null, null, null);
         }
 
-        static CohortPlan planned(
-                CohortsIndex.Entry cohort, Map<String, RemediationReport> reports, String expectedTip,
-                MergeRequestRef existingMergeRequest) {
-            return new CohortPlan(cohort, true, null, reports, expectedTip, existingMergeRequest);
+        static GroupPlan planned(
+                CohortsIndex.Entry cohort, CohortsIndex.Commit commit, String branchName, RemediationReport report,
+                String expectedTip, MergeRequestRef existingMergeRequest) {
+            return new GroupPlan(cohort, commit, branchName, true, null, report, expectedTip, existingMergeRequest);
         }
     }
 
-    private PublicationPreview.CohortPreview toCohortPreview(CohortPlan plan) {
-        CohortsIndex.Entry cohort = plan.cohort();
+    private PublicationPreview.CohortPreview toGroupPreview(GroupPlan plan) {
         MergeRequestRef existing = plan.existingMergeRequest();
         return new PublicationPreview.CohortPreview(
-                cohort.verifiedSourceRef(), cohort.verifiedSourceSha(), cohort.branchName(), cohort.branchName(),
-                plan.eligible() ? plan.expectedTip() : null, targetBranchFor(cohort.verifiedSourceRef()),
-                cohort.commits().stream().map(CohortsIndex.Commit::groupId).toList(),
-                cohort.commits().stream().map(CohortsIndex.Commit::commitSha).toList(),
+                plan.cohort().verifiedSourceRef(), plan.cohort().verifiedSourceSha(), plan.branchName(),
+                plan.branchName(), plan.eligible() ? plan.expectedTip() : null,
+                targetBranchFor(plan.cohort().verifiedSourceRef()),
+                List.of(plan.commit().groupId()), List.of(plan.commit().commitSha()),
                 plan.eligible(), plan.ineligibleReason(),
                 existing == null ? null : existing.state(), existing == null ? null : existing.webUrl());
     }
 
-    private PublicationPreview.CohortPreview ineligibleCohortPreview(CohortsIndex.Entry cohort, String reason) {
+    private PublicationPreview.CohortPreview ineligibleGroupPreview(
+            CohortsIndex.Entry cohort, CohortsIndex.Commit commit, String reason) {
         return new PublicationPreview.CohortPreview(
                 cohort.verifiedSourceRef(), cohort.verifiedSourceSha(), cohort.branchName(), cohort.branchName(),
                 null, targetBranchFor(cohort.verifiedSourceRef()),
-                cohort.commits().stream().map(CohortsIndex.Commit::groupId).toList(),
-                cohort.commits().stream().map(CohortsIndex.Commit::commitSha).toList(),
+                List.of(commit.groupId()), List.of(commit.commitSha()),
                 false, reason, null, null);
     }
 
@@ -450,14 +571,22 @@ public final class GitLabPublicationService {
                 existing.map(IssueRef::state).orElse(null), existing.map(IssueRef::webUrl).orElse(null));
     }
 
-    /** Posts the commit's own report, unless a retry finds it was already posted. */
-    private void publishCommitReport(CohortsIndex.Commit commit, RemediationReport report) {
-        String marker = commitReportMarker(commit.commitSha());
-        if (gitLabClient.commitCommentContains(commit.commitSha(), marker)) {
+    /** Posts the commit's own report, unless a retry finds it was already posted. Posted against
+     *  {@code publishedSha} -- the actually-pushed commit (the cherry-picked commit's own new SHA for a
+     *  reconstructed tree; {@code commit.commitSha()} itself otherwise) -- never assumed to equal
+     *  {@code commit.commitSha()} in the reconstructed case. */
+    private void publishCommitReport(String publishedSha, CohortsIndex.Commit commit, RemediationReport report) {
+        String marker = commitReportMarker(publishedSha);
+        if (gitLabClient.commitCommentContains(publishedSha, marker)) {
             return;
         }
         String body = marker + "\n\n" + remediationReportRenderer.render(report);
-        gitLabClient.postCommitComment(commit.commitSha(), body);
+        gitLabClient.postCommitComment(publishedSha, body);
+    }
+
+    /** ONE group's own report content, and nothing else -- never a whole-run or whole-cohort aggregate. */
+    private String mergeRequestDescription(RemediationReport report) {
+        return remediationReportRenderer.render(report);
     }
 
     private PublicationIndex.HumanReviewPublication publishHumanReviewGroup(String runId, HumanReviewGroup group) {
@@ -507,11 +636,25 @@ public final class GitLabPublicationService {
         return "[Dependency Security] Human review required -- " + report.coordinates();
     }
 
-    private static String mergeRequestTitle(CohortsIndex.Entry cohort) {
-        String riskyPrefix = cohort.effectiveKind() == RemediationCohort.CohortKind.RISKY_SINGLE_GROUP
-                ? "[Risky] " : "";
-        return riskyPrefix + "Dependency remediation: " + cohort.commits().size()
-                + (cohort.commits().size() == 1 ? " group" : " groups") + " (" + cohort.branchName() + ")";
+    /**
+     * One group, one title -- never a "N groups" pluralization, since a Merge Request is now always about
+     * exactly one group. Carries a {@code [Risky]} prefix for a {@code RISKY_SINGLE_GROUP} cohort, and a
+     * {@code [Needs review: plan scope extended]} prefix when {@code PlanConformanceGate} only accepted
+     * this commit via a narrow, failure-driven scope extension (see {@code CohortsIndex.Commit
+     * #requiresHumanReviewDespiteConformance()}) -- either way, a human reviewing this title sees
+     * immediately that ordinary auto-merge expectations do not apply.
+     */
+    private static String mergeRequestTitle(GroupPlan plan) {
+        StringBuilder title = new StringBuilder();
+        if (plan.cohort().effectiveKind() == RemediationCohort.CohortKind.RISKY_SINGLE_GROUP) {
+            title.append("[Risky] ");
+        }
+        if (plan.commit().requiresHumanReviewDespiteConformance()) {
+            title.append("[Needs review: plan scope extended] ");
+        }
+        title.append("Dependency remediation: ").append(plan.commit().groupId())
+                .append(" (").append(plan.branchName()).append(')');
+        return title.toString();
     }
 
     /**

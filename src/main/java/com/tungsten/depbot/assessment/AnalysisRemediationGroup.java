@@ -42,7 +42,8 @@ public record AnalysisRemediationGroup(
         String automationSafetyReason,
         List<String> implementationPlan,
         List<String> validationPlan,
-        List<PlannedDependencyChange> plannedChanges) {
+        List<PlannedDependencyChange> plannedChanges,
+        ImplementationBudget implementationBudget) {
 
     public AnalysisRemediationGroup {
         memberCoordinates = immutable(memberCoordinates);
@@ -53,12 +54,52 @@ public record AnalysisRemediationGroup(
         plannedChanges = immutablePlannedChanges(plannedChanges);
     }
 
+    /**
+     * Backward-compatible shape from before {@code implementationBudget} existed -- defaults it to
+     * {@code null} ({@link #effectiveImplementationBudget()} then reads as {@link ImplementationBudget#STANDARD}).
+     * Kept so every existing caller keeps compiling unchanged.
+     */
+    public AnalysisRemediationGroup(
+            String groupId,
+            List<String> memberCoordinates,
+            List<String> companionCoordinates,
+            String groupingReason,
+            String sourceRef,
+            String claimedSourceCommitSha,
+            DependencyOrigin origin,
+            String dependencyRelationship,
+            String observedVersion,
+            String recommendedRemediation,
+            String recommendedTargetVersion,
+            List<String> affectedFiles,
+            ImpactScore impactScore,
+            String impactReason,
+            AutomationSafety automationSafety,
+            String automationSafetyReason,
+            List<String> implementationPlan,
+            List<String> validationPlan,
+            List<PlannedDependencyChange> plannedChanges) {
+        this(groupId, memberCoordinates, companionCoordinates, groupingReason, sourceRef, claimedSourceCommitSha,
+                origin, dependencyRelationship, observedVersion, recommendedRemediation, recommendedTargetVersion,
+                affectedFiles, impactScore, impactReason, automationSafety, automationSafetyReason,
+                implementationPlan, validationPlan, plannedChanges, null);
+    }
+
     public boolean hasImpactScore() {
         return impactScore != null;
     }
 
     public boolean hasAutomationSafety() {
         return automationSafety != null;
+    }
+
+    /**
+     * How much implementation work the analysis expects for this group -- {@link ImplementationBudget#STANDARD}
+     * when not stated at all, since an unset budget must never grant more attempts/turns than the safe
+     * default. Deliberately unrelated to {@link #requiresRiskyRouting()}: this is never a risk signal.
+     */
+    public ImplementationBudget effectiveImplementationBudget() {
+        return implementationBudget == null ? ImplementationBudget.STANDARD : implementationBudget;
     }
 
     /** Whether a ref was identified at all -- without one there is nothing to branch from. */

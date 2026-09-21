@@ -15,10 +15,21 @@ import java.util.List;
  * read, never turned into a {@code violations} entry -- {@code OTHER} alone never makes {@code
  * conformant} {@code false}.
  */
-public record PlanConformanceResult(boolean conformant, List<String> violations, List<String> unverifiableNotes) {
+public record PlanConformanceResult(
+        boolean conformant, List<String> violations, List<String> unverifiableNotes,
+        List<String> scopeExtensions) {
 
     public PlanConformanceResult {
         violations = violations == null ? List.of() : List.copyOf(violations);
         unverifiableNotes = unverifiableNotes == null ? List.of() : List.copyOf(unverifiableNotes);
+        scopeExtensions = scopeExtensions == null ? List.of() : List.copyOf(scopeExtensions);
+    }
+
+    /**
+     * Backward-compatible shape from before {@code scopeExtensions} existed -- defaults it to
+     * {@code List.of()}. Kept so every existing caller/test keeps compiling unchanged.
+     */
+    public PlanConformanceResult(boolean conformant, List<String> violations, List<String> unverifiableNotes) {
+        this(conformant, violations, unverifiableNotes, List.of());
     }
 }

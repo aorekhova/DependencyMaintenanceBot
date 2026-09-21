@@ -186,7 +186,7 @@ public final class BatchAnalysisService {
                 config);
 
         ClaudeRunOutcome attempt1Outcome = invoker.run(request);
-        AttemptClassification attempt1 = classifyAttempt(attempt1Outcome, request.stdoutFile());
+        AttemptClassification attempt1 = classifyAttempt(attempt1Outcome, request.stdoutFile(), context.workspace());
 
         // The first attempt's own free investigation is trusted as-is -- no coverage gate applies to it.
         if (attempt1.analysis() != null) {
@@ -233,7 +233,8 @@ public final class BatchAnalysisService {
                 context.workspace(), secondPrompt, secondAttemptDirectory, config, sessionId);
 
         ClaudeRunOutcome attempt2Outcome = invoker.run(secondRequest);
-        AttemptClassification attempt2 = classifyAttempt(attempt2Outcome, secondRequest.stdoutFile());
+        AttemptClassification attempt2 =
+                classifyAttempt(attempt2Outcome, secondRequest.stdoutFile(), context.workspace());
 
         if (attempt2.analysis() != null) {
             Optional<String> incompleteReason = AnalysisCoverageValidator.incompletenessReason(attempt2.analysis());
@@ -275,7 +276,8 @@ public final class BatchAnalysisService {
     private static boolean isSchemaRepairEligible(AttemptClassification attempt) {
         AnalysisInvocationOutcomeReason reason = attempt.invocation().outcomeReason();
         return reason == AnalysisInvocationOutcomeReason.MISSING_ANALYSIS
-                || reason == AnalysisInvocationOutcomeReason.MALFORMED_ANALYSIS;
+                || reason == AnalysisInvocationOutcomeReason.MALFORMED_ANALYSIS
+                || reason == AnalysisInvocationOutcomeReason.CONTRADICTORY_PLANNED_CHANGES;
     }
 
     /**
@@ -305,7 +307,8 @@ public final class BatchAnalysisService {
                 context.workspace(), repairPrompt, repairDirectory, config, sessionId);
 
         ClaudeRunOutcome repairOutcome = invoker.run(repairRequest);
-        AttemptClassification repaired = classifyAttempt(repairOutcome, repairRequest.stdoutFile());
+        AttemptClassification repaired =
+                classifyAttempt(repairOutcome, repairRequest.stdoutFile(), context.workspace());
 
         if (repaired.analysis() != null) {
             return recordComplete(context, repaired.analysis(), repairOutcome, analysisDirectory,
@@ -335,7 +338,7 @@ public final class BatchAnalysisService {
             boolean ranOutOfRoom) {
     }
 
-    private AttemptClassification classifyAttempt(ClaudeRunOutcome outcome, Path stdoutFile) {
+    private AttemptClassification classifyAttempt(ClaudeRunOutcome outcome, Path stdoutFile, Path workspace) {
         String subtype = resultExtractor.readSubtypeIfPresent(stdoutFile);
         boolean maxTurnsExceeded = MAX_TURNS_SUBTYPE.equals(subtype);
 
@@ -364,7 +367,7 @@ public final class BatchAnalysisService {
                             + "), so its answer is not a completed analysis.";
                     reason = AnalysisInvocationOutcomeReason.NON_ZERO_EXIT;
                 } else {
-                    analysis = parser.parse(result.text());
+                    analysis = parser.parse(result.text(), workspace);
                     reason = AnalysisInvocationOutcomeReason.COMPLETED;
                 }
             } catch (ClaudeOutputException e) {
@@ -543,6 +546,7 @@ public final class BatchAnalysisService {
             case MISSING_ANALYSIS -> AnalysisInvocationOutcomeReason.MISSING_ANALYSIS;
             case MALFORMED_ANALYSIS -> AnalysisInvocationOutcomeReason.MALFORMED_ANALYSIS;
             case ANALYSIS_VALIDATION_FAILED -> AnalysisInvocationOutcomeReason.ANALYSIS_VALIDATION_FAILED;
+            case CONTRADICTORY_PLANNED_CHANGES -> AnalysisInvocationOutcomeReason.CONTRADICTORY_PLANNED_CHANGES;
         };
     }
 }

@@ -1,11 +1,14 @@
 package com.tungsten.depbot.implementation;
 
 import com.tungsten.depbot.assessment.AnalysisRemediationGroup;
+import com.tungsten.depbot.assessment.PlannedChangeType;
 import com.tungsten.depbot.assessment.PlannedDependencyChange;
 import com.tungsten.depbot.git.GitCommandRunner;
+import com.tungsten.depbot.remediation.RejectionStage;
 
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import org.xml.sax.SAXException;
@@ -19,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -86,6 +90,18 @@ public final class PlanConformanceGate {
 
     public static PhaseAResult checkStructural(
             GitCommandRunner git, Path workspace, String baselineSha, AnalysisRemediationGroup approvedPlan) {
+        return checkStructural(git, workspace, baselineSha, approvedPlan, null);
+    }
+
+    /**
+     * As the 4-arg overload, but on a retry ({@code repairContext != null}) an otherwise-unauthorized file
+     * may be accepted as a narrow, evidence-linked scope extension instead of an outright violation -- see
+     * {@link #checkScopeExtension} for the per-stage rules. {@code repairContext} is {@code null} for
+     * attempt 1 of every group, so this overload behaves identically to the 4-arg one in that case.
+     */
+    public static PhaseAResult checkStructural(
+            GitCommandRunner git, Path workspace, String baselineSha, AnalysisRemediationGroup approvedPlan,
+            RepairContext repairContext) {
         // A plain "git diff <sha>" never shows a brand-new untracked file at all -- marking every
         // untracked path's presence first (metadata only, exactly as AttemptedChangeCapture already
         // relies on) makes an entirely new, out-of-scope file show up in the diff as a real addition,
@@ -97,6 +113,7 @@ public final class PlanConformanceGate {
 
         List<String> violations = new ArrayList<>();
         List<String> unverifiableNotes = new ArrayList<>();
+        List<String> scopeExtensions = new ArrayList<>();
         List<PlannedDependencyChange> pending = new ArrayList<>();
 
         Set<String> allowedFiles = new LinkedHashSet<>(approvedPlan.affectedFiles());
@@ -104,7 +121,15 @@ public final class PlanConformanceGate {
             allowedFiles.add(change.affectedFile());
         }
         for (String changedFile : changedFiles) {
-            if (!allowedFiles.contains(changedFile)) {
+            if (allowedFiles.contains(changedFile)) {
+                continue;
+            }
+            ScopeExtensionResult extension = repairContext == null
+                    ? ScopeExtensionResult.rejected()
+                    : checkScopeExtension(git, workspace, baselineSha, changedFile, approvedPlan, repairContext);
+            if (extension.accepted()) {
+                scopeExtensions.add(extension.detail());
+            } else {
                 violations.add("unauthorized file changed: " + changedFile);
             }
         }
@@ -123,9 +148,9 @@ public final class PlanConformanceGate {
                     }
                 }
                 case EXCLUSION_ADDED -> {
-                    if (!hasExclusion(workspace, pomFiles, change)) {
-                        violations.add("planned exclusion for " + change.dependencyCoordinates()
-                                + " was not found in any of this repository's POM files");
+                    String violation = exclusionViolation(workspace, pomFiles, change);
+                    if (violation != null) {
+                        violations.add(violation);
                     }
                 }
                 case VERSION_BUMP -> {
@@ -145,7 +170,230 @@ public final class PlanConformanceGate {
         }
 
         return new PhaseAResult(
-                new PlanConformanceResult(violations.isEmpty(), violations, unverifiableNotes), pending);
+                new PlanConformanceResult(violations.isEmpty(), violations, unverifiableNotes, scopeExtensions),
+                pending);
+    }
+
+    // ---- failure-driven, narrow, per-stage scope extension (retry only) ---------------------------
+
+    private record ScopeExtensionResult(boolean accepted, String detail) {
+        static ScopeExtensionResult accepted(String detail) {
+            return new ScopeExtensionResult(true, detail);
+        }
+
+        static ScopeExtensionResult rejected() {
+            return new ScopeExtensionResult(false, null);
+        }
+    }
+
+    /**
+     * Whether {@code changedFile} -- otherwise unauthorized -- may be accepted on this retry as a narrow,
+     * mechanically-checkable response to {@code repairContext}'s own machine-owned failure evidence. Each
+     * stage below has its own independent rule; a stage with no rule here always falls through to
+     * {@link ScopeExtensionResult#rejected()} -- there is no generic "attempt 2 may touch anything" path.
+     * Never authorizes a target/version/strategy change: every originally-authorized file still goes
+     * through this same method's caller's unchanged per-{@code plannedChanges} checks regardless of what
+     * happens here.
+     */
+    private static ScopeExtensionResult checkScopeExtension(
+            GitCommandRunner git, Path workspace, String baselineSha, String changedFile,
+            AnalysisRemediationGroup approvedPlan, RepairContext repairContext) {
+        return switch (repairContext.failedStage()) {
+            case DEPENDENCY_VALIDATION -> checkNarrowExclusionOnlyExtension(
+                    git, workspace, baselineSha, changedFile, approvedPlan);
+            case PLAN_DEVIATION_REQUIRED -> checkDiscoveredControlPointExtension(workspace, changedFile, approvedPlan)
+                    ? ScopeExtensionResult.accepted("attempt " + repairContext.failedStage()
+                            + ": " + changedFile + " is this coordinate's own, mechanically-discovered real "
+                            + "control point")
+                    : ScopeExtensionResult.rejected();
+            case FULL_BUILD, CUMULATIVE_JENKINS -> checkEvidenceNamedFileExtension(
+                    git, workspace, baselineSha, changedFile, approvedPlan, repairContext);
+            default -> ScopeExtensionResult.rejected();
+        };
+    }
+
+    /**
+     * {@code DEPENDENCY_VALIDATION} evidence (the json-lib case): the file must already have existed at
+     * baseline, its final state must be structurally identical to baseline except for added
+     * {@code <exclusion>} elements (never a removed one, never any other structural change), and every
+     * newly-added exclusion must target a coordinate {@code approvedPlan} already names as a member --
+     * never an unrelated coordinate.
+     */
+    private static ScopeExtensionResult checkNarrowExclusionOnlyExtension(
+            GitCommandRunner git, Path workspace, String baselineSha, String changedFile,
+            AnalysisRemediationGroup approvedPlan) {
+        Document baseline = new BaselinePomSource(git, workspace, baselineSha).documentAt(changedFile);
+        Document finalDoc = new FilesystemPomSource(workspace).documentAt(changedFile);
+        if (baseline == null || finalDoc == null) {
+            return ScopeExtensionResult.rejected();
+        }
+        if (!canonicalizeIgnoringExclusions(baseline.getDocumentElement())
+                .equals(canonicalizeIgnoringExclusions(finalDoc.getDocumentElement()))) {
+            return ScopeExtensionResult.rejected();
+        }
+
+        Set<String> baselineExclusions = exclusionCoordinates(baseline);
+        Set<String> finalExclusions = exclusionCoordinates(finalDoc);
+        if (!finalExclusions.containsAll(baselineExclusions)) {
+            return ScopeExtensionResult.rejected();
+        }
+        Set<String> added = new LinkedHashSet<>(finalExclusions);
+        added.removeAll(baselineExclusions);
+        if (added.isEmpty()) {
+            return ScopeExtensionResult.rejected();
+        }
+        for (String coordinate : added) {
+            if (!approvedPlan.memberCoordinates().contains(coordinate)) {
+                return ScopeExtensionResult.rejected();
+            }
+        }
+        return ScopeExtensionResult.accepted("DEPENDENCY_VALIDATION retry: " + changedFile
+                + " gained exclusion(s) for " + String.join(", ", added)
+                + " -- the exact coordinate(s) this remediation targets, closing a transitive path the "
+                + "original plan did not cover");
+    }
+
+    /** A canonical string form of {@code element}, with every {@code <exclusion>} subtree treated as
+     *  invisible -- so adding/removing exclusions never affects equality, but any other structural change
+     *  (a version, a new dependency, a reordered/renamed element) does. */
+    private static String canonicalizeIgnoringExclusions(Node node) {
+        if (node.getNodeType() == Node.TEXT_NODE || node.getNodeType() == Node.CDATA_SECTION_NODE) {
+            String text = node.getTextContent();
+            return text == null ? "" : text.strip();
+        }
+        if (node.getNodeType() != Node.ELEMENT_NODE) {
+            return "";
+        }
+        Element element = (Element) node;
+        if ("exclusion".equals(element.getTagName()) || "exclusions".equals(element.getTagName())) {
+            // The wrapper element only ever holds <exclusion> children, so it is just as invisible to
+            // this comparison as the exclusions themselves -- otherwise an <exclusions> block appearing
+            // only in the final state (empty once its own <exclusion> children are suppressed) would
+            // register as a spurious structural difference from a baseline that never had one at all.
+            return "";
+        }
+        StringBuilder canonical = new StringBuilder("<").append(element.getTagName());
+        NamedNodeMap attributes = element.getAttributes();
+        List<String> attributeStrings = new ArrayList<>();
+        for (int i = 0; i < attributes.getLength(); i++) {
+            Node attribute = attributes.item(i);
+            attributeStrings.add(attribute.getNodeName() + "=" + attribute.getNodeValue());
+        }
+        Collections.sort(attributeStrings);
+        for (String attribute : attributeStrings) {
+            canonical.append(' ').append(attribute);
+        }
+        canonical.append('>');
+        NodeList children = element.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            canonical.append(canonicalizeIgnoringExclusions(children.item(i)));
+        }
+        canonical.append("</").append(element.getTagName()).append('>');
+        return canonical.toString();
+    }
+
+    private static Set<String> exclusionCoordinates(Document doc) {
+        Set<String> result = new LinkedHashSet<>();
+        NodeList exclusions = doc.getElementsByTagName("exclusion");
+        for (int i = 0; i < exclusions.getLength(); i++) {
+            Element exclusion = (Element) exclusions.item(i);
+            String groupId = childText(exclusion, "groupId");
+            String artifactId = childText(exclusion, "artifactId");
+            if (groupId != null && artifactId != null) {
+                result.add(groupId + ":" + artifactId);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * {@code PLAN_DEVIATION_REQUIRED} evidence: {@code changedFile} is accepted only if this class's own
+     * independent POM discovery -- never Claude's claim -- proves it is the real control point (a direct
+     * {@code <dependency>} declaration, or an applicable {@code dependencyManagement} entry) for a
+     * coordinate {@code approvedPlan} already plans a {@code VERSION_BUMP}/{@code DEPENDENCY_MANAGEMENT_ADDITION}
+     * for. The declared target for that coordinate must still match the plan exactly -- checked identically
+     * to any authorized file, via this same method's caller's ordinary per-{@code plannedChanges} loop.
+     */
+    private static boolean checkDiscoveredControlPointExtension(
+            Path workspace, String changedFile, AnalysisRemediationGroup approvedPlan) {
+        RepositoryPomIndex finalIndex = new RepositoryPomIndex(new FilesystemPomSource(workspace));
+        for (PlannedDependencyChange change : approvedPlan.plannedChanges()) {
+            if (change.changeType() != PlannedChangeType.VERSION_BUMP
+                    && change.changeType() != PlannedChangeType.DEPENDENCY_MANAGEMENT_ADDITION) {
+                continue;
+            }
+            String[] coordinates = splitCoordinates(change.dependencyCoordinates());
+            Document doc = finalIndex.documentAt(changedFile);
+            if (doc == null) {
+                continue;
+            }
+            if (findDependencyElement(doc, coordinates[0], coordinates[1], false) != null) {
+                return true;
+            }
+            if (findApplicableDependencyManagement(changedFile, finalIndex, coordinates) != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * {@code FULL_BUILD}/{@code CUMULATIVE_JENKINS} evidence: {@code changedFile} must already have
+     * existed at baseline (a brand-new file is never accepted this way) and its full, normalized relative
+     * path must appear verbatim in the machine-produced failure evidence text -- never a bare filename
+     * match, never merely Claude's own assertion. A recognized Maven POM file gets no free pass for its
+     * Maven content just because its path was logged: it must additionally satisfy either the
+     * exclusion-only or the discovered-control-point rule above. A non-POM file (a genuine source/config
+     * compatibility file) is accepted without inspecting its content -- no Java-side semantic analysis of
+     * source code -- but the caller must route the resulting success exactly like a genuine
+     * {@code HUMAN_REVIEW_REQUIRED} group, never merely label it after the fact (see
+     * {@link ScopeExtensionResult#detail()}'s {@code forcesHumanReview} marker prefix).
+     */
+    private static ScopeExtensionResult checkEvidenceNamedFileExtension(
+            GitCommandRunner git, Path workspace, String baselineSha, String changedFile,
+            AnalysisRemediationGroup approvedPlan, RepairContext repairContext) {
+        if (git.showFileAt(workspace, baselineSha, changedFile) == null) {
+            return ScopeExtensionResult.rejected();
+        }
+        String evidenceText = evidenceTextFor(repairContext);
+        if (evidenceText == null || !evidenceText.contains(changedFile)) {
+            return ScopeExtensionResult.rejected();
+        }
+
+        boolean isPom = changedFile.endsWith("pom.xml");
+        if (isPom) {
+            ScopeExtensionResult exclusionOnly =
+                    checkNarrowExclusionOnlyExtension(git, workspace, baselineSha, changedFile, approvedPlan);
+            if (exclusionOnly.accepted()) {
+                return exclusionOnly;
+            }
+            return checkDiscoveredControlPointExtension(workspace, changedFile, approvedPlan)
+                    ? ScopeExtensionResult.accepted(repairContext.failedStage() + " retry: " + changedFile
+                            + " is named in the failure evidence and is a mechanically-discovered real "
+                            + "control point")
+                    : ScopeExtensionResult.rejected();
+        }
+        return ScopeExtensionResult.accepted("FORCES_HUMAN_REVIEW " + repairContext.failedStage()
+                + " retry: " + changedFile + " is a non-Maven compatibility file explicitly named in the "
+                + "machine-produced failure evidence -- accepted without inspecting its content, but this "
+                + "group must be routed exactly like a genuine HUMAN_REVIEW_REQUIRED group, never "
+                + "auto-merge-eligible");
+    }
+
+    private static String evidenceTextFor(RepairContext repairContext) {
+        StringBuilder text = new StringBuilder();
+        if (repairContext.fullBuildValidationOutcome() != null) {
+            text.append(nullToEmpty(repairContext.fullBuildValidationOutcome().reason())).append('\n');
+            text.append(nullToEmpty(repairContext.fullBuildValidationOutcome().output())).append('\n');
+        }
+        if (repairContext.jenkinsConsoleLogExcerpt() != null) {
+            text.append(repairContext.jenkinsConsoleLogExcerpt());
+        }
+        return text.length() == 0 ? null : text.toString();
+    }
+
+    private static String nullToEmpty(String value) {
+        return value == null ? "" : value;
     }
 
     /** Phase B: confirms every still-pending {@code VERSION_BUMP} against already-resolved evidence. */
@@ -165,13 +413,45 @@ public final class PlanConformanceGate {
         return new PlanConformanceResult(violations.isEmpty(), violations, List.of());
     }
 
+    /**
+     * Whether {@code declaringFile}'s own local {@code <parent>} chain currently has a direct
+     * {@code <dependency>} declaration for {@code coordinates} -- the same, scoped discovery
+     * {@link #checkVersionBump} uses to decide whether a {@code VERSION_BUMP} targets an ordinary
+     * dependency or falls back to the management-only path, exposed here so a caller outside this class
+     * (the Vulnerability Analysis Engineer's own structured-output consistency check, run before
+     * Implementation ever sees the plan) can ask the identical question against the current working tree
+     * rather than re-implementing Maven-aware POM discovery.
+     */
+    public static boolean hasDirectDependency(Path workspace, String declaringFile, String coordinates) {
+        RepositoryPomIndex index = new RepositoryPomIndex(new FilesystemPomSource(workspace));
+        Document doc = index.documentAt(declaringFile);
+        if (doc == null) {
+            return false;
+        }
+        String[] parts = splitCoordinates(coordinates);
+        return findDependencyElement(doc, parts[0], parts[1], false) != null;
+    }
+
+    /**
+     * Whether an effective {@code dependencyManagement}/BOM entry for {@code coordinates} already exists,
+     * scoped to exactly {@code declaringFile} and its own local {@code <parent>} chain, in the current
+     * working tree -- the same question {@link #checkVersionBumpAgainstManagedEntry} answers against a
+     * git baseline SHA, exposed here for the same reason as {@link #hasDirectDependency}.
+     */
+    public static boolean hasEffectiveManagedEntry(Path workspace, String declaringFile, String coordinates) {
+        RepositoryPomIndex index = new RepositoryPomIndex(new FilesystemPomSource(workspace));
+        return findApplicableDependencyManagement(declaringFile, index, splitCoordinates(coordinates)) != null;
+    }
+
     /** Combines Phase A's and Phase B's violations and unverifiable notes into one final verdict. */
     public static PlanConformanceResult merge(PlanConformanceResult phaseA, PlanConformanceResult phaseB) {
         List<String> violations = new ArrayList<>(phaseA.violations());
         violations.addAll(phaseB.violations());
         List<String> unverifiableNotes = new ArrayList<>(phaseA.unverifiableNotes());
         unverifiableNotes.addAll(phaseB.unverifiableNotes());
-        return new PlanConformanceResult(violations.isEmpty(), violations, unverifiableNotes);
+        List<String> scopeExtensions = new ArrayList<>(phaseA.scopeExtensions());
+        scopeExtensions.addAll(phaseB.scopeExtensions());
+        return new PlanConformanceResult(violations.isEmpty(), violations, unverifiableNotes, scopeExtensions);
     }
 
     // ---- file scope -----------------------------------------------------------------------------
@@ -696,24 +976,53 @@ public final class PlanConformanceGate {
     // ---- EXCLUSION_ADDED ----------------------------------------------------------------------------
 
     /**
-     * Pragmatic simplification, documented rather than hidden: {@link PlannedDependencyChange} does not
-     * distinguish which host dependency an exclusion must live under -- only which artifact is excluded.
-     * This proves an {@code <exclusion>} with the planned coordinates exists SOMEWHERE in this
-     * repository's POM files, not that it is nested under any particular dependency.
+     * {@code null} when every one of {@code change}'s {@code excludedCoordinates} is nested under its own
+     * {@code dependencyCoordinates} host somewhere in this repository's POM files; otherwise names exactly
+     * which of them are not. Fixes run {@code 20260920-052841-210614}: an excluded coordinate present
+     * SOMEWHERE in the repository, but nested under a different dependency than the plan's own named host,
+     * is never enough -- {@code EXCLUSION_ADDED} is a claim about one specific host's own
+     * {@code <exclusions>} block, not "this artifact is excluded from something."
      */
-    private static boolean hasExclusion(Path workspace, List<String> pomFiles, PlannedDependencyChange change) {
-        String[] coordinates = splitCoordinates(change.dependencyCoordinates());
+    private static String exclusionViolation(Path workspace, List<String> pomFiles, PlannedDependencyChange change) {
+        String[] hostCoordinates = splitCoordinates(change.dependencyCoordinates());
+        List<String> missing = new ArrayList<>();
+        for (String excludedCoordinate : change.excludedCoordinates()) {
+            if (!hasExclusionUnderHost(workspace, pomFiles, hostCoordinates, splitCoordinates(excludedCoordinate))) {
+                missing.add(excludedCoordinate);
+            }
+        }
+        if (missing.isEmpty()) {
+            return null;
+        }
+        return "planned exclusion(s) " + String.join(", ", missing) + " were not found nested under "
+                + change.dependencyCoordinates() + "'s own <dependency> element in any of this "
+                + "repository's POM files";
+    }
+
+    /** Whether {@code excludedCoordinates} appears as an {@code <exclusion>} nested anywhere inside a
+     *  {@code <dependency>} element matching {@code hostCoordinates} -- never merely present somewhere
+     *  else in the same POM. */
+    private static boolean hasExclusionUnderHost(
+            Path workspace, List<String> pomFiles, String[] hostCoordinates, String[] excludedCoordinates) {
         for (String file : pomFiles) {
             Document doc = parseXml(workspace.resolve(file));
             if (doc == null) {
                 continue;
             }
-            NodeList exclusions = doc.getElementsByTagName("exclusion");
-            for (int i = 0; i < exclusions.getLength(); i++) {
-                Element exclusion = (Element) exclusions.item(i);
-                if (coordinates[0].equals(childText(exclusion, "groupId"))
-                        && coordinates[1].equals(childText(exclusion, "artifactId"))) {
-                    return true;
+            NodeList dependencies = doc.getElementsByTagName("dependency");
+            for (int i = 0; i < dependencies.getLength(); i++) {
+                Element dependency = (Element) dependencies.item(i);
+                if (!hostCoordinates[0].equals(childText(dependency, "groupId"))
+                        || !hostCoordinates[1].equals(childText(dependency, "artifactId"))) {
+                    continue;
+                }
+                NodeList exclusions = dependency.getElementsByTagName("exclusion");
+                for (int j = 0; j < exclusions.getLength(); j++) {
+                    Element exclusion = (Element) exclusions.item(j);
+                    if (excludedCoordinates[0].equals(childText(exclusion, "groupId"))
+                            && excludedCoordinates[1].equals(childText(exclusion, "artifactId"))) {
+                        return true;
+                    }
                 }
             }
         }

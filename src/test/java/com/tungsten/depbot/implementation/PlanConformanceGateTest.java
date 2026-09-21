@@ -656,16 +656,29 @@ class PlanConformanceGateTest {
     }
 
     // ---- EXCLUSION_ADDED ------------------------------------------------------------------------------
+    //
+    // dependencyCoordinates is always the HOST dependency the exclusion is added to; excludedCoordinates
+    // (required, non-empty) names what is actually excluded from it -- run 20260920-052841-210614: Claude
+    // #1 set dependencyCoordinates to the host (org.kordamp.json:json-lib-core) and named the excluded
+    // coordinates (junit:junit, org.slf4j:jcl-over-slf4j) only in reason's prose; PlanConformanceGate at
+    // the time treated dependencyCoordinates itself as the excluded coordinate, so it went looking for an
+    // exclusion of json-lib-core that could never exist. These tests check the fixed, fully structural
+    // contract: the exclusion must be nested under the named host's own <dependency> element, never merely
+    // present somewhere in the repository's POM files.
+
+    private static PlannedDependencyChange exclusionAdded(String host, String... excluded) {
+        return new PlannedDependencyChange(host, null, null, "pom.xml", PlannedChangeType.EXCLUSION_ADDED,
+                "exclude vulnerable transitive dependency(ies) from " + host, List.of(excluded));
+    }
 
     @Test
-    @DisplayName("EXCLUSION_ADDED is conformant only when the exact exclusion exists")
-    void exclusionAddedConformantOnlyWhenExclusionExists() throws Exception {
+    @DisplayName("EXCLUSION_ADDED is conformant only when the exact exclusion exists nested under the "
+            + "named host dependency")
+    void exclusionAddedConformantOnlyWhenExclusionExistsUnderHost() throws Exception {
         Path work = GitTestRepos.createOriginAndClone(tempDir);
         String baseline = baselineSha(work);
 
-        PlannedDependencyChange planned = new PlannedDependencyChange(
-                "com.example:transitive-bad", null, null, "pom.xml",
-                PlannedChangeType.EXCLUSION_ADDED, "exclude a vulnerable transitive dependency");
+        PlannedDependencyChange planned = exclusionAdded("com.example:artifact", "com.example:transitive-bad");
         AnalysisRemediationGroup plan = planWith(planned);
 
         Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("</dependency>", """
@@ -682,14 +695,12 @@ class PlanConformanceGateTest {
     }
 
     @Test
-    @DisplayName("EXCLUSION_ADDED is flagged when the exclusion is absent")
+    @DisplayName("EXCLUSION_ADDED is flagged when the exclusion is absent entirely")
     void exclusionAddedFlaggedWhenAbsent() throws Exception {
         Path work = GitTestRepos.createOriginAndClone(tempDir);
         String baseline = baselineSha(work);
 
-        PlannedDependencyChange planned = new PlannedDependencyChange(
-                "com.example:transitive-bad", null, null, "pom.xml",
-                PlannedChangeType.EXCLUSION_ADDED, "exclude a vulnerable transitive dependency");
+        PlannedDependencyChange planned = exclusionAdded("com.example:artifact", "com.example:transitive-bad");
         AnalysisRemediationGroup plan = planWith(planned);
 
         Files.writeString(work.resolve("pom.xml"), BASELINE_POM + "<!-- touched, no exclusion -->",
@@ -698,6 +709,109 @@ class PlanConformanceGateTest {
         var result = PlanConformanceGate.checkStructural(git, work, baseline, plan);
         assertFalse(result.result().conformant());
         assertTrue(result.result().violations().get(0).contains("transitive-bad"));
+    }
+
+    @Test
+    @DisplayName("run 20260920-052841-210614's exact shape: the excluded coordinate exists in the "
+            + "repository, but nested under a different dependency than the one the plan names as the "
+            + "host -- still flagged, never accepted just because the coordinate exists somewhere")
+    void exclusionAddedFlaggedWhenExclusionExistsUnderTheWrongHost() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String baseline = commitFiles(work, Map.of("pom.xml", """
+                <project>
+                  <dependencies>
+                    <dependency>
+                      <groupId>org.kordamp.json</groupId>
+                      <artifactId>json-lib-core</artifactId>
+                      <version>2.1</version>
+                    </dependency>
+                    <dependency>
+                      <groupId>com.example</groupId>
+                      <artifactId>unrelated-host</artifactId>
+                      <version>1.0</version>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """), "baseline");
+
+        // The exclusion for junit:junit ends up nested under the wrong host (unrelated-host), never under
+        // the plan's own named host (org.kordamp.json:json-lib-core).
+        Files.writeString(work.resolve("pom.xml"), """
+                <project>
+                  <dependencies>
+                    <dependency>
+                      <groupId>org.kordamp.json</groupId>
+                      <artifactId>json-lib-core</artifactId>
+                      <version>2.1</version>
+                    </dependency>
+                    <dependency>
+                      <groupId>com.example</groupId>
+                      <artifactId>unrelated-host</artifactId>
+                      <version>1.0</version>
+                      <exclusions>
+                        <exclusion>
+                          <groupId>junit</groupId>
+                          <artifactId>junit</artifactId>
+                        </exclusion>
+                      </exclusions>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """, StandardCharsets.UTF_8);
+
+        PlannedDependencyChange planned = exclusionAdded("org.kordamp.json:json-lib-core", "junit:junit");
+        var result = PlanConformanceGate.checkStructural(git, work, baseline, planWith(planned));
+
+        assertFalse(result.result().conformant());
+        assertTrue(result.result().violations().get(0).contains("junit:junit"), result.result().violations().toString());
+    }
+
+    @Test
+    @DisplayName("one EXCLUSION_ADDED entry naming several excluded coordinates under the same host is "
+            + "conformant only once every one of them is actually nested there")
+    void exclusionAddedWithMultipleExcludedCoordinatesRequiresEveryOne() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String baseline = baselineSha(work);
+
+        PlannedDependencyChange planned = exclusionAdded(
+                "com.example:artifact", "junit:junit", "org.slf4j:jcl-over-slf4j");
+        AnalysisRemediationGroup plan = planWith(planned);
+
+        // Only one of the two planned exclusions is actually present.
+        Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("</dependency>", """
+                    <exclusions>
+                      <exclusion>
+                        <groupId>junit</groupId>
+                        <artifactId>junit</artifactId>
+                      </exclusion>
+                    </exclusions>
+                  </dependency>
+                """), StandardCharsets.UTF_8);
+
+        var partial = PlanConformanceGate.checkStructural(git, work, baseline, plan);
+        assertFalse(partial.result().conformant());
+        assertTrue(partial.result().violations().get(0).contains("jcl-over-slf4j"),
+                partial.result().violations().toString());
+        assertFalse(partial.result().violations().get(0).contains("junit:junit"),
+                "the exclusion that IS present must not also be named as missing: "
+                        + partial.result().violations());
+
+        // Both are now present -- conformant.
+        Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("</dependency>", """
+                    <exclusions>
+                      <exclusion>
+                        <groupId>junit</groupId>
+                        <artifactId>junit</artifactId>
+                      </exclusion>
+                      <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>jcl-over-slf4j</artifactId>
+                      </exclusion>
+                    </exclusions>
+                  </dependency>
+                """), StandardCharsets.UTF_8);
+
+        assertTrue(PlanConformanceGate.checkStructural(git, work, baseline, plan).result().conformant());
     }
 
     // ---- OTHER ------------------------------------------------------------------------------------------
@@ -1269,5 +1383,362 @@ class PlanConformanceGateTest {
 
         var result = PlanConformanceGate.checkStructural(git, work, baseline, plan);
         assertTrue(result.result().conformant(), result.result().violations().toString());
+    }
+
+    // ---- failure-driven, narrow, per-stage scope extension (run 20260919-221201-636b49, json-lib case) ----
+
+    private static AnalysisRemediationGroup planWithMembers(
+            List<String> memberCoordinates, PlannedDependencyChange... changes) {
+        return new AnalysisRemediationGroup(
+                "g", memberCoordinates, List.of(), "narrative", null, null, null, null, null, null, null,
+                List.of("pom.xml"), null, null, null, null, List.of(), List.of(), List.of(changes));
+    }
+
+    private static com.tungsten.depbot.implementation.RepairContext dependencyValidationRepairContext() {
+        return new com.tungsten.depbot.implementation.RepairContext(
+                "diff", com.tungsten.depbot.remediation.RejectionStage.DEPENDENCY_VALIDATION,
+                com.tungsten.depbot.validation.ValidationOutcome.failed(
+                        "the vulnerable coordinate still resolves via a companion module", List.of(), ""),
+                null, null, null, List.of(), "dependency validation failed");
+    }
+
+    private static final String COMPANION_POM = """
+            <project>
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>com.example</groupId>
+              <artifactId>test-services</artifactId>
+              <version>1.0.0</version>
+              <dependencies>
+                <dependency>
+                  <groupId>com.example</groupId>
+                  <artifactId>jaxb-companion</artifactId>
+                  <version>2.2</version>
+                </dependency>
+              </dependencies>
+            </project>
+            """;
+
+    @Test
+    @DisplayName("DEPENDENCY_VALIDATION retry: an exclusion-only extra file targeting the plan's own "
+            + "member coordinate is accepted as a narrow scope extension")
+    void dependencyValidationRetryAcceptsNarrowExclusionOnlyExtension() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String baseline = commitFiles(work,
+                Map.of("pom.xml", BASELINE_POM, "test-services/pom.xml", COMPANION_POM), "baseline");
+
+        AnalysisRemediationGroup plan = planWithMembers(
+                List.of("com.example:artifact"), versionBump("com.example:artifact", "1.0", "1.1"));
+
+        Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("1.0", "1.1"), StandardCharsets.UTF_8);
+        Files.writeString(work.resolve("test-services/pom.xml"), COMPANION_POM.replace(
+                "</dependency>",
+                "<exclusions><exclusion><groupId>com.example</groupId><artifactId>artifact</artifactId>"
+                        + "</exclusion></exclusions></dependency>"));
+
+        var result = PlanConformanceGate.checkStructural(git, work, baseline, plan, dependencyValidationRepairContext());
+
+        assertTrue(result.result().conformant(), result.result().violations().toString());
+        assertFalse(result.result().scopeExtensions().isEmpty());
+        assertTrue(result.result().scopeExtensions().get(0).contains("test-services/pom.xml"));
+    }
+
+    @Test
+    @DisplayName("DEPENDENCY_VALIDATION retry: the same extra file is rejected outright on attempt 1 "
+            + "(repairContext is null) -- the 4-arg overload behaves identically")
+    void extraFileNeverAllowedWhenRepairContextIsNull() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String baseline = commitFiles(work,
+                Map.of("pom.xml", BASELINE_POM, "test-services/pom.xml", COMPANION_POM), "baseline");
+
+        AnalysisRemediationGroup plan = planWithMembers(
+                List.of("com.example:artifact"), versionBump("com.example:artifact", "1.0", "1.1"));
+
+        Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("1.0", "1.1"), StandardCharsets.UTF_8);
+        Files.writeString(work.resolve("test-services/pom.xml"), COMPANION_POM.replace(
+                "</dependency>",
+                "<exclusions><exclusion><groupId>com.example</groupId><artifactId>artifact</artifactId>"
+                        + "</exclusion></exclusions></dependency>"));
+
+        var withoutRepair = PlanConformanceGate.checkStructural(git, work, baseline, plan);
+        var withNullRepair = PlanConformanceGate.checkStructural(git, work, baseline, plan, null);
+
+        assertFalse(withoutRepair.result().conformant());
+        assertFalse(withNullRepair.result().conformant());
+        assertTrue(withoutRepair.result().violations().stream().anyMatch(v -> v.contains("test-services/pom.xml")));
+    }
+
+    @Test
+    @DisplayName("DEPENDENCY_VALIDATION retry: an extra file that also changes something beyond exclusions "
+            + "is still rejected")
+    void extraFileWithNonExclusionChangeIsRejected() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String baseline = commitFiles(work,
+                Map.of("pom.xml", BASELINE_POM, "test-services/pom.xml", COMPANION_POM), "baseline");
+
+        AnalysisRemediationGroup plan = planWithMembers(
+                List.of("com.example:artifact"), versionBump("com.example:artifact", "1.0", "1.1"));
+
+        Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("1.0", "1.1"), StandardCharsets.UTF_8);
+        // Adds the exclusion AND bumps the companion's own version -- not exclusion-only.
+        Files.writeString(work.resolve("test-services/pom.xml"), COMPANION_POM
+                .replace("<version>2.2</version>", "<version>2.3</version>")
+                .replace("</dependency>",
+                        "<exclusions><exclusion><groupId>com.example</groupId><artifactId>artifact</artifactId>"
+                                + "</exclusion></exclusions></dependency>"));
+
+        var result = PlanConformanceGate.checkStructural(git, work, baseline, plan, dependencyValidationRepairContext());
+
+        assertFalse(result.result().conformant());
+        assertTrue(result.result().violations().stream().anyMatch(v -> v.contains("test-services/pom.xml")));
+    }
+
+    @Test
+    @DisplayName("DEPENDENCY_VALIDATION retry: an exclusion for a coordinate the plan does not target is "
+            + "still rejected")
+    void extraFileExclusionForUnrelatedCoordinateIsRejected() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String baseline = commitFiles(work,
+                Map.of("pom.xml", BASELINE_POM, "test-services/pom.xml", COMPANION_POM), "baseline");
+
+        AnalysisRemediationGroup plan = planWithMembers(
+                List.of("com.example:artifact"), versionBump("com.example:artifact", "1.0", "1.1"));
+
+        Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("1.0", "1.1"), StandardCharsets.UTF_8);
+        Files.writeString(work.resolve("test-services/pom.xml"), COMPANION_POM.replace(
+                "</dependency>",
+                "<exclusions><exclusion><groupId>com.example</groupId><artifactId>unrelated-library</artifactId>"
+                        + "</exclusion></exclusions></dependency>"));
+
+        var result = PlanConformanceGate.checkStructural(git, work, baseline, plan, dependencyValidationRepairContext());
+
+        assertFalse(result.result().conformant());
+    }
+
+    @Test
+    @DisplayName("DEPENDENCY_VALIDATION retry: removing a pre-existing exclusion is still rejected -- no "
+            + "silent un-excludes")
+    void extraFileRemovingAnExclusionIsRejected() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String companionWithExclusion = COMPANION_POM.replace(
+                "</dependency>",
+                "<exclusions><exclusion><groupId>com.example</groupId><artifactId>artifact</artifactId>"
+                        + "</exclusion></exclusions></dependency>");
+        String baseline = commitFiles(work,
+                Map.of("pom.xml", BASELINE_POM, "test-services/pom.xml", companionWithExclusion), "baseline");
+
+        AnalysisRemediationGroup plan = planWithMembers(
+                List.of("com.example:artifact"), versionBump("com.example:artifact", "1.0", "1.1"));
+
+        Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("1.0", "1.1"), StandardCharsets.UTF_8);
+        Files.writeString(work.resolve("test-services/pom.xml"), COMPANION_POM); // exclusion removed
+
+        var result = PlanConformanceGate.checkStructural(git, work, baseline, plan, dependencyValidationRepairContext());
+
+        assertFalse(result.result().conformant());
+    }
+
+    @Test
+    @DisplayName("the exclusion-only extension is never allowed for a FULL_BUILD failure stage -- each "
+            + "stage's rule is independent")
+    void scopeExtensionNeverAllowedWhenFailedStageIsFullBuild() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String baseline = commitFiles(work,
+                Map.of("pom.xml", BASELINE_POM, "test-services/pom.xml", COMPANION_POM), "baseline");
+
+        AnalysisRemediationGroup plan = planWithMembers(
+                List.of("com.example:artifact"), versionBump("com.example:artifact", "1.0", "1.1"));
+
+        Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("1.0", "1.1"), StandardCharsets.UTF_8);
+        Files.writeString(work.resolve("test-services/pom.xml"), COMPANION_POM.replace(
+                "</dependency>",
+                "<exclusions><exclusion><groupId>com.example</groupId><artifactId>artifact</artifactId>"
+                        + "</exclusion></exclusions></dependency>"));
+
+        com.tungsten.depbot.implementation.RepairContext fullBuildRepair =
+                new com.tungsten.depbot.implementation.RepairContext(
+                        "diff", com.tungsten.depbot.remediation.RejectionStage.FULL_BUILD, null,
+                        com.tungsten.depbot.validation.ValidationOutcome.failed("build failed", List.of(), ""),
+                        null, null, List.of(), "full build failed");
+
+        var result = PlanConformanceGate.checkStructural(git, work, baseline, plan, fullBuildRepair);
+
+        assertFalse(result.result().conformant(),
+                "an exclusion-only edit must not be accepted under a stage it has no rule for");
+    }
+
+    // ---- PLAN_DEVIATION_REQUIRED: Java's own discovered control point ------------------------------
+
+    @Test
+    @DisplayName("PLAN_DEVIATION_REQUIRED retry: an extra file that Java's own POM discovery proves is a "
+            + "planned coordinate's real dependencyManagement control point is accepted")
+    void planDeviationRetryAcceptsDiscoveredControlPointExtension() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String parentPom = """
+                <project>
+                  <modelVersion>4.0.0</modelVersion>
+                  <groupId>com.example</groupId>
+                  <artifactId>parent</artifactId>
+                  <version>1.0.0</version>
+                </project>
+                """;
+        String childPom = """
+                <project>
+                  <modelVersion>4.0.0</modelVersion>
+                  <parent>
+                    <groupId>com.example</groupId>
+                    <artifactId>parent</artifactId>
+                    <version>1.0.0</version>
+                    <relativePath>../pom.xml</relativePath>
+                  </parent>
+                  <artifactId>app</artifactId>
+                </project>
+                """;
+        String baseline = commitFiles(work, Map.of("pom.xml", parentPom, "app/pom.xml", childPom), "baseline");
+
+        // The plan only names pom.xml as affected -- the real control point (a new dependencyManagement
+        // entry) turns out to belong in the parent, discovered mechanically, never asserted by Claude.
+        AnalysisRemediationGroup plan = planWithMembers(List.of("com.example:artifact"), new PlannedDependencyChange(
+                "com.example:artifact", null, "1.1", "pom.xml",
+                PlannedChangeType.DEPENDENCY_MANAGEMENT_ADDITION, "add a managed entry"));
+
+        Files.writeString(work.resolve("app/pom.xml"), childPom); // unchanged
+        Files.writeString(work.resolve("pom.xml"), parentPom.replace("</project>", """
+                  <dependencyManagement>
+                    <dependencies>
+                      <dependency>
+                        <groupId>com.example</groupId>
+                        <artifactId>artifact</artifactId>
+                        <version>1.1</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """));
+
+        com.tungsten.depbot.implementation.RepairContext planDeviationRepair =
+                new com.tungsten.depbot.implementation.RepairContext(
+                        "diff", com.tungsten.depbot.remediation.RejectionStage.PLAN_DEVIATION_REQUIRED, null, null,
+                        null, null, List.of("unauthorized file changed: pom.xml"), "plan deviation");
+
+        var result = PlanConformanceGate.checkStructural(git, work, baseline, plan, planDeviationRepair);
+
+        assertTrue(result.result().conformant(), result.result().violations().toString());
+    }
+
+    // ---- FULL_BUILD/CUMULATIVE_JENKINS: evidence-named file -----------------------------------------
+
+    @Test
+    @DisplayName("FULL_BUILD retry: a brand-new file named in the evidence is still rejected -- never "
+            + "allowed through this rule")
+    void fullBuildRetryRejectsBrandNewFile() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String baseline = baselineSha(work);
+
+        AnalysisRemediationGroup plan = planWithMembers(
+                List.of("com.example:artifact"), versionBump("com.example:artifact", "1.0", "1.1"));
+
+        Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("1.0", "1.1"), StandardCharsets.UTF_8);
+        Files.createDirectories(work.resolve("src/main/java/com/example"));
+        Files.writeString(work.resolve("src/main/java/com/example/Compat.java"), "class Compat {}\n");
+        GitTestRepos.run(work, "git", "add", "src/main/java/com/example/Compat.java");
+
+        com.tungsten.depbot.implementation.RepairContext fullBuildRepair =
+                new com.tungsten.depbot.implementation.RepairContext(
+                        "diff", com.tungsten.depbot.remediation.RejectionStage.FULL_BUILD, null,
+                        com.tungsten.depbot.validation.ValidationOutcome.failed(
+                                "cannot find symbol in src/main/java/com/example/Compat.java", List.of(), ""),
+                        null, null, List.of(), "full build failed");
+
+        var result = PlanConformanceGate.checkStructural(git, work, baseline, plan, fullBuildRepair);
+
+        assertFalse(result.result().conformant(), "a brand-new file is never accepted through this rule");
+    }
+
+    @Test
+    @DisplayName("FULL_BUILD retry: a base-name-only match (not the full path) in the evidence is not "
+            + "enough -- the full, exact relative path must be named")
+    void fullBuildRetryRequiresFullPathMatch() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String companionJava = "class Compat { void old() {} }\n";
+        String baseline = commitFiles(work,
+                Map.of("pom.xml", BASELINE_POM, "src/main/java/com/example/Compat.java", companionJava),
+                "baseline");
+
+        AnalysisRemediationGroup plan = planWithMembers(
+                List.of("com.example:artifact"), versionBump("com.example:artifact", "1.0", "1.1"));
+
+        Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("1.0", "1.1"), StandardCharsets.UTF_8);
+        Files.writeString(work.resolve("src/main/java/com/example/Compat.java"),
+                "class Compat { void updated() {} }\n");
+
+        com.tungsten.depbot.implementation.RepairContext fullBuildRepair =
+                new com.tungsten.depbot.implementation.RepairContext(
+                        "diff", com.tungsten.depbot.remediation.RejectionStage.FULL_BUILD, null,
+                        com.tungsten.depbot.validation.ValidationOutcome.failed(
+                                "cannot find symbol in Compat.java", List.of(), ""),
+                        null, null, List.of(), "full build failed");
+
+        var result = PlanConformanceGate.checkStructural(git, work, baseline, plan, fullBuildRepair);
+
+        assertFalse(result.result().conformant(), "only the base filename was named, not the full path");
+    }
+
+    @Test
+    @DisplayName("FULL_BUILD retry: a non-POM compatibility file named in the evidence is accepted, and "
+            + "the resulting outcome carries the forces-human-review marker")
+    void fullBuildRetryAcceptsEvidenceNamedCompatibilityFile() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String companionJava = "class Compat { void old() {} }\n";
+        String baseline = commitFiles(work,
+                Map.of("pom.xml", BASELINE_POM, "src/main/java/com/example/Compat.java", companionJava),
+                "baseline");
+
+        AnalysisRemediationGroup plan = planWithMembers(
+                List.of("com.example:artifact"), versionBump("com.example:artifact", "1.0", "1.1"));
+
+        Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("1.0", "1.1"), StandardCharsets.UTF_8);
+        Files.writeString(work.resolve("src/main/java/com/example/Compat.java"),
+                "class Compat { void updated() {} }\n");
+
+        com.tungsten.depbot.implementation.RepairContext fullBuildRepair =
+                new com.tungsten.depbot.implementation.RepairContext(
+                        "diff", com.tungsten.depbot.remediation.RejectionStage.FULL_BUILD, null,
+                        com.tungsten.depbot.validation.ValidationOutcome.failed(
+                                "cannot find symbol in src/main/java/com/example/Compat.java", List.of(), ""),
+                        null, null, List.of(), "full build failed");
+
+        var result = PlanConformanceGate.checkStructural(git, work, baseline, plan, fullBuildRepair);
+
+        assertTrue(result.result().conformant(), result.result().violations().toString());
+        assertTrue(result.result().scopeExtensions().stream().anyMatch(s -> s.contains("FORCES_HUMAN_REVIEW")));
+    }
+
+    @Test
+    @DisplayName("FULL_BUILD retry: a POM file named in the evidence gets no free pass for its Maven "
+            + "content -- a non-exclusion, non-discovered-control-point edit is still rejected")
+    void fullBuildRetryPomFileStillNeedsMechanicalJustification() throws Exception {
+        Path work = GitTestRepos.createOriginAndClone(tempDir);
+        String baseline = commitFiles(work,
+                Map.of("pom.xml", BASELINE_POM, "test-services/pom.xml", COMPANION_POM), "baseline");
+
+        AnalysisRemediationGroup plan = planWithMembers(
+                List.of("com.example:artifact"), versionBump("com.example:artifact", "1.0", "1.1"));
+
+        Files.writeString(work.resolve("pom.xml"), BASELINE_POM.replace("1.0", "1.1"), StandardCharsets.UTF_8);
+        // Bumps the companion's own unrelated version -- not an exclusion, not a discovered control point
+        // for anything the plan actually targets.
+        Files.writeString(work.resolve("test-services/pom.xml"),
+                COMPANION_POM.replace("<version>2.2</version>", "<version>2.3</version>"));
+
+        com.tungsten.depbot.implementation.RepairContext fullBuildRepair =
+                new com.tungsten.depbot.implementation.RepairContext(
+                        "diff", com.tungsten.depbot.remediation.RejectionStage.FULL_BUILD, null,
+                        com.tungsten.depbot.validation.ValidationOutcome.failed(
+                                "test-services/pom.xml needs a bump too", List.of(), ""),
+                        null, null, List.of(), "full build failed");
+
+        var result = PlanConformanceGate.checkStructural(git, work, baseline, plan, fullBuildRepair);
+
+        assertFalse(result.result().conformant());
     }
 }

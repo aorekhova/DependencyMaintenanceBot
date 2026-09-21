@@ -15,6 +15,10 @@ public enum GroupLifecycleStage {
     IMPLEMENTATION_ATTEMPT_2,
     /** Dependency validation, the full build, and cumulative Jenkins for attempt 2, resolved either way. */
     VALIDATION_ATTEMPT_2,
+    /** An {@code EXTENDED}-budget group's own third attempt -- never reached by a {@code STANDARD} group. */
+    IMPLEMENTATION_ATTEMPT_3,
+    /** Dependency validation, the full build, and cumulative Jenkins for attempt 3, resolved either way. */
+    VALIDATION_ATTEMPT_3,
     FINAL_OUTCOME_DECIDED,
     PUBLISHED
 }

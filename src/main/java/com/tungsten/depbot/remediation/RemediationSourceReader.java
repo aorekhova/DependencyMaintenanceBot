@@ -34,6 +34,15 @@ public final class RemediationSourceReader {
         return read(actionableReportPath, ActionableReport.class, "an actionable report", "scan");
     }
 
+    /**
+     * Where {@link #readActionableReport()} reads from -- exposed so an external source
+     * (e.g. {@code remediate --input-report}) can be written to exactly this path instead of
+     * duplicating it, keeping this reader the single place that path is decided.
+     */
+    public Path actionableReportPath() {
+        return actionableReportPath;
+    }
+
     /** @throws RemediationSourceException if it is missing or cannot be understood */
     public RemediationPlan readPlan() {
         return read(planPath, RemediationPlan.class, "a remediation plan", "plan-remediation");

@@ -68,12 +68,16 @@ public final class HumanReviewPromptRenderer {
         lines.add("");
         appendRole(lines, context);
         appendFindings(lines, context);
+        // Later, bot-verified evidence is rendered before the original, pre-implementation plan: an
+        // automatic attempt (if one happened) established facts more specific and more recent than
+        // whatever open questions the original analysis raised, and appendGroupPlan's own framing below
+        // tells the reader to prefer them when the two disagree.
+        appendRejectedGroupOutcome(lines, context);
+        appendJenkinsValidation(lines, context);
+        appendCohortIntegrationFailure(lines, context);
         appendGroupPlan(lines, context.group());
         appendCompanions(lines, context);
         appendFailureContext(lines, context);
-        appendJenkinsValidation(lines, context);
-        appendRejectedGroupOutcome(lines, context);
-        appendCohortIntegrationFailure(lines, context);
         appendAuthority(lines);
         appendExpectedOutput(lines);
 
@@ -140,6 +144,17 @@ public final class HumanReviewPromptRenderer {
             return;
         }
         lines.add("## What the earlier analysis worked out for this group");
+        lines.add("");
+        lines.add("This is the ORIGINAL, pre-implementation assessment, written before any automatic attempt "
+                + "ran -- the LOWEST-priority evidence in this report. The precedence, most authoritative "
+                + "first, is: (1) machine-owned facts (dependency validation, full build, Jenkins -- see "
+                + "\"What the automatic attempt already established\" above), (2) the implementation's own "
+                + "narrative report, (3) this original assessment. Where anything above contradicts or "
+                + "resolves a question raised here, treat that higher-precedence evidence as authoritative "
+                + "-- never repeat a stale open question or unresolved claim that a later attempt already "
+                + "settled. If a change was established but not retained (rolled back), state plainly what "
+                + "was established AND that it was not kept, and why -- never imply a fix was applied when "
+                + "it was rolled back.");
         lines.add("");
         lines.add("- Why these findings belong together: " + text(group.groupingReason()));
         lines.add("- Ref assessed: " + text(group.sourceRef()));
@@ -219,6 +234,15 @@ public final class HumanReviewPromptRenderer {
         }
         com.tungsten.depbot.remediation.RejectedGroupOutcome outcome = context.rejectedGroupOutcome();
         lines.add("## What the automatic attempt already established");
+        lines.add("");
+        lines.add("**Evidence precedence, most authoritative first: machine-owned facts (the structured "
+                + "results below -- dependency validation, full build, Jenkins) outrank the implementation's "
+                + "own free-text narrative (\"what was attempted\"/\"what changed\" below), which in turn "
+                + "outranks the original, pre-implementation assessment further down.** If the "
+                + "implementation's own narrative says something is out of scope, already excluded, or "
+                + "otherwise resolved, but a machine-owned result in this same section says otherwise (for "
+                + "example a dependency-validation or full-build status that did not pass), trust the "
+                + "machine-owned result -- it is Java-verified, never Claude's own unverified word.");
         lines.add("");
         lines.add("- Priority: " + outcome.priority());
         lines.add("- Execution order: " + (outcome.executionOrder() == null ? FindingContextRenderer.NOT_PROVIDED
